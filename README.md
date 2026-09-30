@@ -1,4 +1,4 @@
-# Simple Camera
+# Lumen Camera
 
 An original Camera Go-inspired browser PWA for Chromebook tablets such as the Acer Chromebook Tab 311. It is focused on taking and improving a photo on-device, without a gallery, cloud upload, or video editor.
 
