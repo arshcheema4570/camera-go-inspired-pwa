@@ -66,19 +66,57 @@ function merge(frames, mode) {
 }
 
 /* ------------------------------------------------------------------
-   Finishing chain (runs on the merged burst in the fallback path):
-     1. Filmic dynamic-range mapping (Hable curve): rolls off highlights,
-        deepens the toe, and boosts midtone contrast so the image "pops".
-     2. Local micro-contrast: unsharp mask on luma against a small-radius
-        blurred neighborhood — adds texture bite without halos.
-     3. Edge sharpening: stronger unsharp mask with a noise gate so flat
-        areas (sky, skin) are not sharpened into grain.
+   Finishing styles — Snapseed recipes mapped to algorithms.
+   iPhone look: bright Smart-HDR balance, rescued highlights, lifted
+     shadows, gentle S-contrast, warmth +3, natural saturation.
+   Pixel look: deeper HDR contrast, stronger highlight recovery and
+     shadow lift, higher micro-contrast (structure), slightly cool tone.
+   Shared: clamped gray-world auto WB (cast removal only),
+     micro-contrast (structure) + gated edge sharpening, vibrance.
+   Portrait face tricks (lens blur / spotlight / skin smoothing) are
+   intentionally omitted — no face landmarks in this pipeline.
    ------------------------------------------------------------------ */
-function hable(x) {
-  const A = 0.15, B = 0.50, C = 0.10, D = 0.20, E = 0.02, F = 0.30;
-  return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+const STYLES = {
+  iphone: {
+    exposure: 1.12, nightExposure: 1.28,
+    shadowTarget: 0.18, shadowAmt: 0.22, shadowEdge: 0.32,
+    knee: 0.72, kneeKeep: 0.72,
+    contrast: 1.07,
+    tempR: 1.018, tempB: 0.992,
+    saturation: 1.07,
+    microAmt: 0.5,
+    sharpAmt: 1.0, nightSharpAmt: 0.55,
+    sharpGate: 0.016, nightSharpGate: 0.035,
+    vibrance: 0.10,
+  },
+  pixel: {
+    exposure: 1.08, nightExposure: 1.28,
+    shadowTarget: 0.21, shadowAmt: 0.34, shadowEdge: 0.34,
+    knee: 0.68, kneeKeep: 0.60,
+    contrast: 1.15,
+    tempR: 0.996, tempB: 1.008,
+    saturation: 1.05,
+    microAmt: 0.7,
+    sharpAmt: 1.0, nightSharpAmt: 0.55,
+    sharpGate: 0.016, nightSharpGate: 0.035,
+    vibrance: 0.15,
+  },
+};
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
 }
-const HABLE_WHITE = hable(1.0);
+
+function wbGains(data) {
+  let sr = 0, sg = 0, sb = 0;
+  const n = data.length / 4;
+  for (let i = 0; i < data.length; i += 4) { sr += data[i]; sg += data[i + 1]; sb += data[i + 2]; }
+  const mr = sr / n / 255, mg = sg / n / 255, mb = sb / n / 255;
+  const lum = mr * 0.2126 + mg * 0.7152 + mb * 0.0722;
+  if (lum <= 0.001) return [1, 1, 1];
+  const clamp = (v) => Math.max(0.85, Math.min(1.18, v));
+  return [clamp(lum / mr), clamp(lum / mg), clamp(lum / mb)];
+}
 
 function blurLumaSeparable(luma, width, height, radius) {
   const tmp = new Float32Array(luma.length);
@@ -104,36 +142,60 @@ function blurLumaSeparable(luma, width, height, radius) {
   return out;
 }
 
-function fallback(image, mode = "photo") {
+function fallback(image, mode = "photo", style = "iphone") {
+  const S = STYLES[style] || STYLES.iphone;
   const { width, height, data } = image;
   const count = width * height;
+  const [gr, gg, gb] = wbGains(data);
+  const exposure = mode === "night" ? S.nightExposure : S.exposure;
   const luma = new Float32Array(count);
   const out = new Uint8ClampedArray(count * 4);
-  const exposure = mode === "night" ? 1.3 : 1.05;
 
-  // Pass 1: filmic tone map per channel + luma
+  // Pass 1: WB -> exposure -> highlight knee -> contrast ->
+  //         shadow lift -> temperature -> saturation
   for (let i = 0; i < count; i += 1) {
     const o = i * 4;
-    const r = Math.min(1, hable((data[o] / 255) * exposure) / HABLE_WHITE);
-    const g = Math.min(1, hable((data[o + 1] / 255) * exposure) / HABLE_WHITE);
-    const b = Math.min(1, hable((data[o + 2] / 255) * exposure) / HABLE_WHITE);
-    out[o] = r * 255; out[o + 1] = g * 255; out[o + 2] = b * 255; out[o + 3] = 255;
+    let r = (data[o] / 255) * gr * exposure;
+    let g = (data[o + 1] / 255) * gg * exposure;
+    let b = (data[o + 2] / 255) * gb * exposure;
+    // highlights: soft knee rescues bright detail (HDR)
+    if (r > S.knee) r = S.knee + (r - S.knee) * S.kneeKeep;
+    if (g > S.knee) g = S.knee + (g - S.knee) * S.kneeKeep;
+    if (b > S.knee) b = S.knee + (b - S.knee) * S.kneeKeep;
+    // contrast: S-curve punch
+    r = (r - 0.5) * S.contrast + 0.5;
+    g = (g - 0.5) * S.contrast + 0.5;
+    b = (b - 0.5) * S.contrast + 0.5;
+    // shadows: smooth lift of dark areas (applied after contrast so it survives)
+    r += (S.shadowTarget - r) * S.shadowAmt * smoothstep(S.shadowEdge, 0.0, r);
+    g += (S.shadowTarget - g) * S.shadowAmt * smoothstep(S.shadowEdge, 0.0, g);
+    b += (S.shadowTarget - b) * S.shadowAmt * smoothstep(S.shadowEdge, 0.0, b);
+    // temperature: iPhone warmth vs Pixel clinical cool
+    r *= S.tempR; b *= S.tempB;
+    const l = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    // saturation around luma
+    r = l + (r - l) * S.saturation;
+    g = l + (g - l) * S.saturation;
+    b = l + (b - l) * S.saturation;
     luma[i] = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    out[o] = Math.max(0, Math.min(255, r * 255));
+    out[o + 1] = Math.max(0, Math.min(255, g * 255));
+    out[o + 2] = Math.max(0, Math.min(255, b * 255));
+    out[o + 3] = 255;
   }
 
-  // Pass 2: blurred luma neighborhood for micro-contrast
+  // Pass 2: blurred luma neighborhood (structure + ambiance local contrast)
   const blur = blurLumaSeparable(luma, width, height, 2);
 
   // Pass 3: micro-contrast + gated edge sharpening + vibrance
-  const microAmt = 0.42;
-  const sharpAmt = mode === "night" ? 0.55 : 1.0;
-  const sharpGate = mode === "night" ? 0.035 : 0.016;
+  const sharpAmt = mode === "night" ? S.nightSharpAmt : S.sharpAmt;
+  const sharpGate = mode === "night" ? S.nightSharpGate : S.sharpGate;
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const i = y * width + x;
       const o = i * 4;
       const l = luma[i];
-      const micro = (l - blur[i]) * microAmt;
+      const micro = (l - blur[i]) * S.microAmt;
       const xm = x > 0 ? i - 1 : i, xp = x < width - 1 ? i + 1 : i;
       const ym = y > 0 ? i - width : i, yp = y < height - 1 ? i + width : i;
       const neigh = (luma[xm] + luma[xp] + luma[ym] + luma[yp]) * 0.25;
@@ -142,7 +204,7 @@ function fallback(image, mode = "photo") {
       const delta = micro + sharp;
       const r = out[o] / 255, g = out[o + 1] / 255, b = out[o + 2] / 255;
       const sat = Math.max(r, g, b) - Math.min(r, g, b);
-      const vib = 1 + (1 - Math.min(1, sat * 2.4)) * 0.14;
+      const vib = 1 + (1 - Math.min(1, sat * 2.4)) * S.vibrance;
       out[o]     = Math.max(0, Math.min(255, (l + (r - l) * vib + delta) * 255));
       out[o + 1] = Math.max(0, Math.min(255, (l + (g - l) * vib + delta) * 255));
       out[o + 2] = Math.max(0, Math.min(255, (l + (b - l) * vib + delta) * 255));
@@ -198,16 +260,16 @@ async function neural(image) {
 }
 
 self.onmessage = async (event) => {
-  const { id, frames, mode } = event.data;
+  const { id, frames, mode, style } = event.data;
   const started = performance.now();
   try {
     await initialize();
     const merged = merge(frames, mode);
-    const image = runner ? await neural(merged) : { ...merged, data: fallback(merged, mode) };
+    const image = runner ? await neural(merged) : { ...merged, data: fallback(merged, mode, style) };
     const elapsedMs = Math.round(performance.now() - started);
     self.postMessage({ id, type: "result", width: image.width, height: image.height, data: image.data, elapsedMs, engine, status }, [image.data.buffer]);
   } catch (error) {
-    const merged = merge(frames, mode); const data = fallback(merged, mode);
+    const merged = merge(frames, mode); const data = fallback(merged, mode, style);
     self.postMessage({ id, type: "result", width: merged.width, height: merged.height, data, elapsedMs: Math.round(performance.now() - started), engine: "Fallback", status: "FALLBACK_MODE", warning: error.message }, [data.buffer]);
   }
 };

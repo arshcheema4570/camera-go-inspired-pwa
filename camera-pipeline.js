@@ -29,7 +29,10 @@ const viewerImage = $("viewerImage");
 const viewerClose = $("viewerClose");
 const viewerSave = $("viewerSave");
 const viewerShare = $("viewerShare");
+const styleButton = $("styleButton");
+const styleVal = $("styleVal");
 let viewerObjectUrl = null;
+let photoStyle = localStorage.getItem("lumen.photoStyle") === "pixel" ? "pixel" : "iphone";
 
 const MAX_WIDTH = 1280;
 const MAX_HEIGHT = 720;
@@ -238,7 +241,7 @@ function processBurst(frames) {
     const id = ++requestId;
     const handler = (event) => { if (event.data.id !== id) return; worker.removeEventListener("message", handler); event.data.error ? reject(new Error(event.data.error)) : resolve(event.data); };
     worker.addEventListener("message", handler);
-    worker.postMessage({ id, frames, mode }, frames.map((frame) => frame.data.buffer));
+    worker.postMessage({ id, frames, mode, style: photoStyle }, frames.map((frame) => frame.data.buffer));
   });
 }
 
@@ -304,6 +307,8 @@ zoomRange.oninput = setZoom;
 video.onclick = showFocus;
 gridButton.onclick = () => { const on = !gridOverlay.classList.toggle("hidden"); gridButton.setAttribute("aria-pressed", String(on)); gridButton.classList.toggle("off", !on); };
 timerButton.onclick = () => { timerSeconds = timerSeconds === 0 ? 3 : timerSeconds === 3 ? 10 : 0; timerLabel.textContent = timerSeconds ? `${timerSeconds}s` : "Off"; timerButton.setAttribute("aria-pressed", String(Boolean(timerSeconds))); timerButton.classList.toggle("off", !timerSeconds); };
+styleVal.textContent = photoStyle === "pixel" ? "Pixel" : "iPhone";
+styleButton.onclick = () => { photoStyle = photoStyle === "pixel" ? "iphone" : "pixel"; localStorage.setItem("lumen.photoStyle", photoStyle); styleVal.textContent = photoStyle === "pixel" ? "Pixel" : "iPhone"; setStatus(`${styleVal.textContent} look`); };
 document.querySelectorAll(".mode").forEach((button) => button.onclick = () => { document.querySelectorAll(".mode").forEach((item) => { item.classList.remove("active"); item.setAttribute("aria-selected", "false"); }); button.classList.add("active"); button.setAttribute("aria-selected", "true"); mode = button.dataset.mode; setStatus(`${button.textContent} mode`); });
 document.querySelectorAll(".zoom-shortcut").forEach((button) => button.onclick = () => { zoomRange.value = button.dataset.zoom; zoomRange.dispatchEvent(new Event("input")); document.querySelectorAll(".zoom-shortcut").forEach((item) => item.classList.toggle("active", item === button)); });
 galleryThumbButton.onclick = openViewer;
