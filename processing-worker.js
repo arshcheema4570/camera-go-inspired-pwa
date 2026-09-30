@@ -21,7 +21,9 @@ self.onmessage = (event) => {
         for (let channel = 0; channel < 3; channel += 1) {
           const neighbor = (output[index - 4 + channel] + output[index + 4 + channel] + output[index - stride + channel] + output[index + stride + channel]) / 4;
           const sharpened = output[index + channel] + (output[index + channel] - neighbor) * 0.3;
-          output[index + channel] = Math.max(0, Math.min(255, (sharpened - 128) * 1.06 + 128));
+          const contrasted = Math.max(0, (sharpened - 128) * 1.06 + 128) / 255;
+          // Keep this curve numerically aligned with the live WebGL viewfinder.
+          output[index + channel] = Math.max(0, Math.min(255, Math.pow(contrasted, 1.08) * 0.97 * 255));
         }
       }
     }

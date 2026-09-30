@@ -214,6 +214,7 @@ async function takePhoto() {
   try {
     const result = await captureBurst(count);
     captureCanvas.width = result.width; captureCanvas.height = result.height;
+    document.documentElement.style.setProperty("--capture-ratio", `${result.width} / ${result.height}`);
     captureCanvas.getContext("2d").putImageData(new ImageData(result.data, result.width, result.height), 0, 0);
     const blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", 0.94));
     originalImage = await createImageBitmap(blob); processedBlob = blob;
