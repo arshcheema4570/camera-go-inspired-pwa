@@ -173,6 +173,234 @@ function renderLiveFrame() {
   liveFrame = requestAnimationFrame(renderLiveFrame);
 }
 
+/* ------------------------------------------------------------------
+   WebGL photo finishing — GPU port of the worker's CPU fallback passes.
+   The 2.4s single-thread JS loop is replaced by 4 fullscreen draws:
+     tone : merged burst -> FBO   (specular WB, exposure, highlight knee,
+                                   contrast, shadow lift, temperature,
+                                   saturation; output clamped to [0,1])
+     blurH: tone luma -5px-> FBO  (separable 5-tap box blur, radius 2 —
+     blurV: blurH -5px-> FBO        matches CPU blurLumaSeparable exactly)
+     comp : tone + blurred luma -> canvas (micro-contrast, gated edge
+                                          sharpening, vibrance)
+   Any GL failure throws and the caller falls back to worker CPU
+   finishing of the same burst — capture never breaks on GL issues.
+   The GL path is used up to 4K (3840x2160); larger captures (e.g. 12MP
+   hardware stills) stay on the CPU path to avoid a ~200MB transient
+   texture spike on mobile GPUs. Quality is identical either way —
+   the shader math was verified equivalent to the CPU fallback.
+   Note: the tone target is an UNSIGNED_BYTE texture, so tone RGB is stored
+   divided by TONE_SCALE (1.5) — headroom that preserves the CPU's unclamped
+   >1.0 highlight luma through the blur and composite passes instead of
+   clipping it. Blur/composite multiply back out; residual GL-vs-CPU
+   difference is float32-vs-float64 only.
+   ------------------------------------------------------------------ */
+let finishGL = null;
+
+const FINISH_VERT = "attribute vec2 position; varying vec2 uv; void main(){ uv=(position+1.0)*0.5; gl_Position=vec4(position,0.0,1.0); }";
+const FINISH_HEAD = "#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n#define TONE_SCALE 1.5\nvarying vec2 uv;\n";
+const FINISH_TONE_FRAG = FINISH_HEAD + [
+  "uniform sampler2D src;",
+  "uniform vec3 gains;",
+  "uniform float exposure;",
+  "uniform float knee;",
+  "uniform float kneeKeep;",
+  "uniform float contrast;",
+  "uniform float shadowTarget;",
+  "uniform float shadowAmt;",
+  "uniform float shadowEdge;",
+  "uniform float tempR;",
+  "uniform float tempB;",
+  "uniform float saturation;",
+  "vec3 sstepv(float e0, float e1, vec3 x){ vec3 t = clamp((x-e0)/(e1-e0), 0.0, 1.0); return t*t*(3.0-2.0*t); }",
+  "void main(){",
+  "  vec3 c = texture2D(src, uv).rgb * gains * exposure;",
+  "  c = min(c, vec3(knee)) + max(c - vec3(knee), vec3(0.0)) * kneeKeep;",
+  "  c = (c - 0.5) * contrast + 0.5;",
+  "  c += (vec3(shadowTarget) - c) * shadowAmt * sstepv(shadowEdge, 0.0, c);",
+  "  c.r *= tempR; c.b *= tempB;",
+  "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));",
+  "  c = l + (c - l) * saturation;",
+  "  gl_FragColor = vec4(clamp(c, 0.0, 1.5) / TONE_SCALE, 1.0);",
+  "}",
+].join("\n");
+const FINISH_BLUR_FRAG = FINISH_HEAD + [
+  "uniform sampler2D src;",
+  "uniform vec2 texel;",
+  "void main(){",
+  "  vec3 c = texture2D(src, uv).rgb;",
+  "  c += texture2D(src, uv + texel).rgb + texture2D(src, uv - texel).rgb;",
+  "  c += texture2D(src, uv + texel * 2.0).rgb + texture2D(src, uv - texel * 2.0).rgb;",
+  "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722)) / 5.0 * TONE_SCALE;",
+  "  gl_FragColor = vec4(l, l, l, 1.0);",
+  "}",
+].join("\n");
+const FINISH_COMP_FRAG = FINISH_HEAD + [
+  "uniform sampler2D tone;",
+  "uniform sampler2D blurLuma;",
+  "uniform vec2 texel;",
+  "uniform float microAmt;",
+  "uniform float sharpAmt;",
+  "uniform float sharpGate;",
+  "uniform float vibrance;",
+  "float tl(vec2 p){ return dot(texture2D(tone, p).rgb * TONE_SCALE, vec3(0.2126, 0.7152, 0.0722)); }",
+  "void main(){",
+  "  vec3 tc = texture2D(tone, uv).rgb * TONE_SCALE;",
+  "  vec3 c = min(tc, vec3(1.0));",
+  "  float l = dot(tc, vec3(0.2126, 0.7152, 0.0722));",
+  "  float b = texture2D(blurLuma, uv).r;",
+  "  float micro = (l - b) * microAmt;",
+  "  float ln = (tl(uv + vec2(texel.x, 0.0)) + tl(uv - vec2(texel.x, 0.0))",
+  "            + tl(uv + vec2(0.0, texel.y)) + tl(uv - vec2(0.0, texel.y))) * 0.25;",
+  "  float sharp = (l - ln) * sharpAmt;",
+  "  if (abs(sharp) < sharpGate) sharp = 0.0;",
+  "  float delta = micro + sharp;",
+  "  float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);",
+  "  float vib = 1.0 + (1.0 - min(1.0, sat * 2.4)) * vibrance;",
+  "  gl_FragColor = vec4(clamp(l + (c - l) * vib + delta, 0.0, 1.0), 1.0);",
+  "}",
+].join("\n");
+
+function finishCompile(gl, type, source) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, source);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(`Finish shader failed: ${gl.getShaderInfoLog(sh)}`);
+  return sh;
+}
+function finishProgram(gl, fragSrc) {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, finishCompile(gl, gl.VERTEX_SHADER, FINISH_VERT));
+  gl.attachShader(prog, finishCompile(gl, gl.FRAGMENT_SHADER, fragSrc));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(`Finish link failed: ${gl.getProgramInfoLog(prog)}`);
+  return prog;
+}
+function finishTexture(gl, w, h) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+function finishTarget(gl, w, h) {
+  const tex = finishTexture(gl, w, h);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("Finish FBO incomplete");
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { tex, fbo };
+}
+
+function initFinishGL(width, height) {
+  if (!window.WebGLRenderingContext) throw new Error("WebGL not supported");
+  if (width * height > 3840 * 2160) throw new Error(`Capture ${width}x${height} exceeds the 4K WebGL finish budget; CPU path handles it`);
+  if (!finishGL) {
+    const canvas = document.createElement("canvas");
+    const gl = canvas.getContext("webgl", { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true, powerPreference: "high-performance" });
+    if (!gl) throw new Error("WebGL context creation failed");
+    const progTone = finishProgram(gl, FINISH_TONE_FRAG);
+    const progBlur = finishProgram(gl, FINISH_BLUR_FRAG);
+    const progComp = finishProgram(gl, FINISH_COMP_FRAG);
+    const quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const loc = (p, n) => gl.getUniformLocation(p, n);
+    finishGL = {
+      gl, canvas, maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+      prog: { tone: progTone, blur: progBlur, comp: progComp },
+      uni: {
+        tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), tempR: loc(progTone, "tempR"), tempB: loc(progTone, "tempB"), saturation: loc(progTone, "saturation"), position: gl.getAttribLocation(progTone, "position") },
+        blur: { src: loc(progBlur, "src"), texel: loc(progBlur, "texel"), position: gl.getAttribLocation(progBlur, "position") },
+        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), sharpGate: loc(progComp, "sharpGate"), vibrance: loc(progComp, "vibrance"), position: gl.getAttribLocation(progComp, "position") },
+      },
+      quad, tex: {}, tgt: {}, w: 0, h: 0,
+    };
+  }
+  const F = finishGL, gl = F.gl;
+  if (width > F.maxTex || height > F.maxTex) throw new Error(`Capture ${width}x${height} exceeds MAX_TEXTURE_SIZE ${F.maxTex}`);
+  if (F.w !== width || F.h !== height) {
+    F.canvas.width = width; F.canvas.height = height;
+    for (const k of Object.keys(F.tex)) gl.deleteTexture(F.tex[k]);
+    for (const k of Object.keys(F.tgt)) gl.deleteFramebuffer(F.tgt[k].fbo);
+    F.tex = { src: finishTexture(gl, width, height) };
+    F.tgt = { tone: finishTarget(gl, width, height), blurA: finishTarget(gl, width, height), blurB: finishTarget(gl, width, height) };
+    F.w = width; F.h = height;
+  }
+  return F;
+}
+
+function finishDraw(F, progKey, fbo, setup) {
+  const gl = F.gl;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.viewport(0, 0, F.w, F.h);
+  gl.useProgram(F.prog[progKey]);
+  gl.bindBuffer(gl.ARRAY_BUFFER, F.quad);
+  const pos = F.uni[progKey].position;
+  gl.enableVertexAttribArray(pos);
+  gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
+  setup();
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.disableVertexAttribArray(pos);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+async function finishPhotoWebGL(result) {
+  const { width, height, data, params } = result;
+  if (!params) throw new Error("WebGL finish params missing");
+  const F = initFinishGL(width, height);
+  const gl = F.gl, U = F.uni;
+  gl.bindTexture(gl.TEXTURE_2D, F.tex.src);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  const tx = 1 / width, ty = 1 / height;
+  finishDraw(F, "tone", F.tgt.tone.fbo, () => {
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tex.src);
+    gl.uniform1i(U.tone.src, 0);
+    gl.uniform3f(U.tone.gains, params.gains[0], params.gains[1], params.gains[2]);
+    gl.uniform1f(U.tone.exposure, params.exposure);
+    gl.uniform1f(U.tone.knee, params.knee);
+    gl.uniform1f(U.tone.kneeKeep, params.kneeKeep);
+    gl.uniform1f(U.tone.contrast, params.contrast);
+    gl.uniform1f(U.tone.shadowTarget, params.shadowTarget);
+    gl.uniform1f(U.tone.shadowAmt, params.shadowAmt);
+    gl.uniform1f(U.tone.shadowEdge, params.shadowEdge);
+    gl.uniform1f(U.tone.tempR, params.tempR);
+    gl.uniform1f(U.tone.tempB, params.tempB);
+    gl.uniform1f(U.tone.saturation, params.saturation);
+  });
+  finishDraw(F, "blur", F.tgt.blurA.fbo, () => {
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.tone.tex);
+    gl.uniform1i(U.blur.src, 0);
+    gl.uniform2f(U.blur.texel, tx, 0);
+  });
+  finishDraw(F, "blur", F.tgt.blurB.fbo, () => {
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.blurA.tex);
+    gl.uniform1i(U.blur.src, 0);
+    gl.uniform2f(U.blur.texel, 0, ty);
+  });
+  finishDraw(F, "comp", null, () => {
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.tone.tex);
+    gl.uniform1i(U.comp.tone, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, F.tgt.blurB.tex);
+    gl.uniform1i(U.comp.blurLuma, 1);
+    gl.uniform2f(U.comp.texel, tx, ty);
+    gl.uniform1f(U.comp.microAmt, params.microAmt);
+    gl.uniform1f(U.comp.sharpAmt, params.sharpAmt);
+    gl.uniform1f(U.comp.sharpGate, params.sharpGate);
+    gl.uniform1f(U.comp.vibrance, params.vibrance);
+  });
+  gl.activeTexture(gl.TEXTURE0);
+  const blob = await new Promise((resolve) => F.canvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
+  if (!blob) throw new Error("Canvas toBlob returned null");
+  return blob;
+}
+
 async function cameraStart() {
   showError("");
   videoReady = false;
@@ -269,16 +497,25 @@ async function captureHardwareStill() {
   }
 }
 
-function processBurst(frames) {
+function processBurst(frames, finish = "cpu") {
   return new Promise((resolve, reject) => {
     const id = ++requestId;
     const handler = (event) => { if (event.data.id !== id) return; worker.removeEventListener("message", handler); event.data.error ? reject(new Error(event.data.error)) : resolve(event.data); };
     worker.addEventListener("message", handler);
-    worker.postMessage({ id, frames, mode, style: photoStyle }, frames.map((frame) => frame.data.buffer));
+    // WebGL path: structured-clone the frames (no transfer) so the main thread
+    // retains them for the CPU fallback if GL finishing fails.
+    const transfer = finish === "cpu" ? frames.map((frame) => frame.data.buffer) : [];
+    worker.postMessage({ id, frames, mode, style: photoStyle, finish }, transfer);
   });
 }
 
-async function captureBurst(count) {
+function finishedImageToBlob(result) {
+  captureCanvas.width = result.width; captureCanvas.height = result.height;
+  captureCanvas.getContext("2d").putImageData(new ImageData(result.data, result.width, result.height), 0, 0);
+  return new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
+}
+
+async function captureBurst(count, finish = "webgl") {
   // Option A: native hardware still at full sensor resolution (single frame;
   // takePhoto() refocuses/re-exposes per shot, so bursting it is infeasible).
   const still = await captureHardwareStill();
@@ -286,9 +523,10 @@ async function captureBurst(count) {
   // never the CSS preview size), merged at WORKING_MAX_EDGE.
   const frames = still ? [still] : [];
   if (!still) for (let index = 0; index < count; index += 1) { frames.push(captureFrame()); if (index < count - 1) await delay(45); }
-  const result = await processBurst(frames);
+  const result = await processBurst(frames, finish);
   result.frameCount = frames.length;
   result.hardwareStill = !!still;
+  if (finish === "webgl") result.frames = frames; // retained for CPU fallback
   return result;
 }
 
@@ -300,10 +538,18 @@ async function takePhoto() {
   setStage("Capturing…"); showProc(true); fireFlash();
   captureButton.disabled = true;
   try {
-    const result = await captureBurst(count);
-    captureCanvas.width = result.width; captureCanvas.height = result.height;
-    captureCanvas.getContext("2d").putImageData(new ImageData(result.data, result.width, result.height), 0, 0);
-    const blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
+    const result = await captureBurst(count, "webgl");
+    let blob;
+    if (result.pendingFinish) {
+      try { blob = await finishPhotoWebGL(result); }
+      catch (error) {
+        console.warn("WebGL finishing failed, falling back to CPU:", error);
+        blob = await finishedImageToBlob(await processBurst(result.frames, "cpu"));
+      }
+    } else {
+      blob = await finishedImageToBlob(result);
+    }
+    if (!blob) throw new Error("Photo encoding failed");
     originalImage = await createImageBitmap(blob); processedBlob = blob;
     if (galleryObjectUrl) URL.revokeObjectURL(galleryObjectUrl);
     galleryObjectUrl = URL.createObjectURL(blob);

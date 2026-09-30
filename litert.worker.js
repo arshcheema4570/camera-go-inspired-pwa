@@ -50,19 +50,114 @@ function resize(image, targetWidth = 0, targetHeight = 0) {
   return { width, height, data };
 }
 
+/* ------------------------------------------------------------------
+   Translational frame registration.
+   Handheld burst frames are offset by a few pixels of micro-jitter.
+   Averaging them unaligned smears edges, so each frame is registered to
+   frame 0 with a hierarchical integer-translation search before the
+   ghost-rejecting accumulation:
+     1. Coarse: luma downsampled to 160x90, SAD grid search over [-8, 8].
+     2. Fine: full-resolution luma, SAD over +/-10 px around the coarse
+        estimate (stride-8 sampled), giving 1-px final precision — the
+        16-px coarse grid alone would be too coarse for micro-jitter.
+   ------------------------------------------------------------------ */
+function lumaFull(data, width, height) {
+  const luma = new Uint8Array(width * height);
+  for (let i = 0, n = width * height; i < n; i += 1) {
+    const o = i * 4;
+    luma[i] = (data[o] * 77 + data[o + 1] * 150 + data[o + 2] * 29) >> 8;
+  }
+  return luma;
+}
+
+function downsampleLuma(luma, width, height, dw, dh) {
+  const out = new Uint8Array(dw * dh);
+  const sx = width / dw, sy = height / dh;
+  for (let y = 0; y < dh; y += 1) {
+    const srcY = Math.min(height - 1, (y * sy) | 0) * width;
+    for (let x = 0; x < dw; x += 1) out[y * dw + x] = luma[srcY + Math.min(width - 1, (x * sx) | 0)];
+  }
+  return out;
+}
+
+function sadShift(ref, tgt, w, h, dx, dy) {
+  let sad = 0;
+  const x0 = Math.max(0, -dx), x1 = Math.min(w, w - dx);
+  const y0 = Math.max(0, -dy), y1 = Math.min(h, h - dy);
+  for (let y = y0; y < y1; y += 1) {
+    const rRow = y * w, tRow = (y + dy) * w;
+    for (let x = x0; x < x1; x += 1) sad += Math.abs(ref[rRow + x] - tgt[tRow + x + dx]);
+  }
+  return sad;
+}
+
+function estimateShiftCoarse(refLuma, tgtLuma, width, height) {
+  const dw = 160, dh = 90;
+  const ref = downsampleLuma(refLuma, width, height, dw, dh);
+  const tgt = downsampleLuma(tgtLuma, width, height, dw, dh);
+  let bestDx = 0, bestDy = 0, bestSad = Infinity;
+  for (let dy = -8; dy <= 8; dy += 1) for (let dx = -8; dx <= 8; dx += 1) {
+    const sad = sadShift(ref, tgt, dw, dh, dx, dy);
+    if (sad < bestSad) { bestSad = sad; bestDx = dx; bestDy = dy; }
+  }
+  return [bestDx * (width / dw), bestDy * (height / dh)];
+}
+
+function estimateShiftFine(refLuma, tgtLuma, width, height, estX, estY) {
+  // 1-px refinement on stride-8 samples (whole-frame coverage, cheap).
+  // Early termination: abandon a candidate as soon as it exceeds the best SAD.
+  const stride = 8, range = 10;
+  const cx = Math.round(estX), cy = Math.round(estY);
+  let bestDx = cx, bestDy = cy, bestSad = Infinity;
+  for (let dy = -range; dy <= range; dy += 1) for (let dx = -range; dx <= range; dx += 1) {
+    const sx = cx + dx, sy = cy + dy;
+    let sad = 0;
+    const x0 = Math.max(0, -sx), x1 = Math.min(width, width - sx);
+    const y0 = Math.max(0, -sy), y1 = Math.min(height, height - sy);
+    for (let y = y0; y < y1 && sad < bestSad; y += stride) {
+      const rRow = y * width, tRow = (y + sy) * width;
+      for (let x = x0; x < x1; x += stride) {
+        sad += Math.abs(refLuma[rRow + x] - tgtLuma[tRow + x + sx]);
+        if (sad >= bestSad) break;
+      }
+    }
+    if (sad < bestSad) { bestSad = sad; bestDx = sx; bestDy = sy; }
+  }
+  return [bestDx, bestDy];
+}
+
 function merge(frames, mode) {
   const base = frames[0];
+  const { width, height } = base;
   const data = new Uint8ClampedArray(base.data);
   const threshold = mode === "night" ? 42 : 30;
-  for (let i = 0; i < data.length; i += 4) {
-    let r = 0, g = 0, b = 0, count = 0;
-    for (const frame of frames) {
-      const delta = Math.abs(frame.data[i] - base.data[i]) + Math.abs(frame.data[i + 1] - base.data[i + 1]) + Math.abs(frame.data[i + 2] - base.data[i + 2]);
-      if (delta < threshold) { r += frame.data[i]; g += frame.data[i + 1]; b += frame.data[i + 2]; count += 1; }
+  // Register every frame to the base frame; frame 0 needs no shift.
+  const shifts = [[0, 0]];
+  if (frames.length > 1) {
+    const baseLuma = lumaFull(base.data, width, height);
+    for (let k = 1; k < frames.length; k += 1) {
+      const tgtLuma = lumaFull(frames[k].data, width, height);
+      const [cx, cy] = estimateShiftCoarse(baseLuma, tgtLuma, width, height);
+      shifts.push(estimateShiftFine(baseLuma, tgtLuma, width, height, cx, cy));
     }
-    if (count) { data[i] = r / count; data[i + 1] = g / count; data[i + 2] = b / count; }
   }
-  return { width: base.width, height: base.height, data };
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = (y * width + x) * 4;
+      let r = 0, g = 0, b = 0, count = 0;
+      for (let k = 0; k < frames.length; k += 1) {
+        const [sx, sy] = shifts[k];
+        const tx = x + sx, ty = y + sy;
+        if (tx < 0 || tx >= width || ty < 0 || ty >= height) continue;
+        const t = (ty * width + tx) * 4;
+        const frame = frames[k];
+        const delta = Math.abs(frame.data[t] - base.data[i]) + Math.abs(frame.data[t + 1] - base.data[i + 1]) + Math.abs(frame.data[t + 2] - base.data[i + 2]);
+        if (delta < threshold) { r += frame.data[t]; g += frame.data[t + 1]; b += frame.data[t + 2]; count += 1; }
+      }
+      if (count) { data[i] = r / count; data[i + 1] = g / count; data[i + 2] = b / count; }
+    }
+  }
+  return { width, height, data };
 }
 
 /* ------------------------------------------------------------------
@@ -107,15 +202,25 @@ function smoothstep(edge0, edge1, x) {
   return t * t * (3 - 2 * t);
 }
 
-function wbGains(data) {
-  let sr = 0, sg = 0, sb = 0;
-  const n = data.length / 4;
-  for (let i = 0; i < data.length; i += 4) { sr += data[i]; sg += data[i + 1]; sb += data[i + 2]; }
-  const mr = sr / n / 255, mg = sg / n / 255, mb = sb / n / 255;
-  const lum = mr * 0.2126 + mg * 0.7152 + mb * 0.0722;
-  if (lum <= 0.001) return [1, 1, 1];
-  const clamp = (v) => Math.max(0.85, Math.min(1.18, v));
-  return [clamp(lum / mr), clamp(lum / mg), clamp(lum / mb)];
+/* Specular-highlight white balance (replaces naive gray-world).
+   Gray-world averages the whole frame, so a large colored wall drags the
+   ambient tones with it. Specular and near-white highlights instead reflect
+   the illuminant itself, so gains are estimated ONLY from pixels whose
+   luminance falls in [0.78, 0.96] (bright but not clipped):
+     gr = Gspec / Rspec, gb = Gspec / Bspec, green anchored at 1.0,
+     tightly clamped to [0.91, 1.10] — cast removal only, never a look.
+   If fewer than 0.1% of pixels qualify (e.g. dark night scenes), there is
+   no trustworthy illuminant estimate, so gains stay neutral. */
+function specularWBGains(data) {
+  let sr = 0, sg = 0, sb = 0, n = 0;
+  const total = data.length / 4;
+  for (let i = 0; i < data.length; i += 4) {
+    const l = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+    if (l >= 0.78 && l <= 0.96) { sr += data[i]; sg += data[i + 1]; sb += data[i + 2]; n += 1; }
+  }
+  if (n < total * 0.001 || sr <= 0 || sb <= 0) return [1, 1, 1];
+  const clamp = (v) => Math.max(0.91, Math.min(1.10, v));
+  return [clamp((sg / n) / (sr / n)), 1, clamp((sg / n) / (sb / n))];
 }
 
 function blurLumaSeparable(luma, width, height, radius) {
@@ -146,7 +251,7 @@ function fallback(image, mode = "photo", style = "iphone") {
   const S = STYLES[style] || STYLES.iphone;
   const { width, height, data } = image;
   const count = width * height;
-  const [gr, gg, gb] = wbGains(data);
+  const [gr, gg, gb] = specularWBGains(data);
   const exposure = mode === "night" ? S.nightExposure : S.exposure;
   const luma = new Float32Array(count);
   const out = new Uint8ClampedArray(count * 4);
@@ -260,11 +365,32 @@ async function neural(image) {
 }
 
 self.onmessage = async (event) => {
-  const { id, frames, mode, style } = event.data;
+  const { id, frames, mode, style, finish } = event.data;
   const started = performance.now();
   try {
     await initialize();
     const merged = merge(frames, mode);
+    if (!runner && finish === "webgl") {
+      // WebGL finishing runs on the main thread: hand over the merged frame
+      // plus specular WB gains and fully-resolved style params. The CPU
+      // fallback() stays as the automatic safety net if GL fails.
+      const S = STYLES[style] || STYLES.iphone;
+      const [gr, gg, gb] = specularWBGains(merged.data);
+      const params = {
+        gains: [gr, gg, gb],
+        exposure: mode === "night" ? S.nightExposure : S.exposure,
+        knee: S.knee, kneeKeep: S.kneeKeep, contrast: S.contrast,
+        shadowTarget: S.shadowTarget, shadowAmt: S.shadowAmt, shadowEdge: S.shadowEdge,
+        tempR: S.tempR, tempB: S.tempB, saturation: S.saturation,
+        microAmt: S.microAmt,
+        sharpAmt: mode === "night" ? S.nightSharpAmt : S.sharpAmt,
+        sharpGate: mode === "night" ? S.nightSharpGate : S.sharpGate,
+        vibrance: S.vibrance,
+      };
+      const elapsedMs = Math.round(performance.now() - started);
+      self.postMessage({ id, type: "result", width: merged.width, height: merged.height, data: merged.data, params, pendingFinish: true, elapsedMs, engine, status }, [merged.data.buffer]);
+      return;
+    }
     const image = runner ? await neural(merged) : { ...merged, data: fallback(merged, mode, style) };
     const elapsedMs = Math.round(performance.now() - started);
     self.postMessage({ id, type: "result", width: image.width, height: image.height, data: image.data, elapsedMs, engine, status }, [image.data.buffer]);
