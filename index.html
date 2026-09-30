@@ -1,42 +1,96 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-  <meta name="theme-color" content="#121212">
-  <meta name="description" content="Private Lumen Camera PWA with local LiteRT enhancement and adaptive fallback processing.">
-  <link rel="manifest" href="./manifest.json">
-  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="./icons/icon-192.png">
-  <link rel="stylesheet" href="./styles.css">
-  <title>Lumen Camera</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Lumen Camera</title>
+<meta name="theme-color" content="#000000">
+<meta name="description" content="Lumen Camera — on-device computational photography. No cloud, no account.">
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="./styles.css?v=14">
 </head>
 <body>
-  <main class="app-shell">
-    <section class="camera-card" aria-label="Camera">
-      <div class="viewfinder-wrapper preview-wrap">
-        <video id="preview" autoplay muted playsinline></video>
-        <canvas id="fxCanvas" class="fx-canvas hidden" aria-hidden="true"></canvas>
-        <canvas id="captureCanvas" class="hidden"></canvas>
-        <div id="previewPlaceholder" class="preview-placeholder"><div class="camera-glyph">◉</div><p>Private camera processing on this device</p><button id="startButton" class="primary-button" type="button">Start camera</button></div>
-        <div class="top-scrim" aria-hidden="true"></div>
-        <header class="camera-topbar">
-          <span id="storageIndicator" class="camera-pill">1,248 photos left</span>
-          <span id="topModeStatus" class="top-mode-status">Photo</span>
-          <div class="top-actions"><button id="settingsButton" class="icon-button" type="button" aria-label="Camera settings">⚙</button><button id="flashButton" class="icon-button" type="button" aria-label="Toggle flash" aria-pressed="false" disabled>⚡</button></div>
-        </header>
-        <div id="gridOverlay" class="grid-overlay hidden" aria-hidden="true"></div><div id="focusRing" class="focus-ring hidden" aria-hidden="true"></div><div id="countdown" class="countdown hidden" aria-live="assertive"></div><div id="statusPill" class="status-pill" role="status">Camera off</div>
-      </div>
-      <div class="camera-deck">
-        <div class="zoom-pill" aria-label="Quick zoom"><button class="zoom-shortcut active" data-zoom="1" type="button">1×</button><button class="zoom-shortcut" data-zoom="2" type="button">2×</button><label class="zoom-range-wrap"><span class="sr-only">Fine zoom</span><input id="zoomRange" type="range" min="1" max="1" step="0.1" value="1" disabled><span id="zoomLabel">1×</span></label></div>
-        <nav class="mode-strip" role="tablist" aria-label="Camera mode"><button class="mode" data-mode="portrait" role="tab" aria-selected="false">Portrait</button><button class="mode active" data-mode="photo" role="tab" aria-selected="true">Photo</button><button class="mode" data-mode="night" role="tab" aria-selected="false">Night</button><button class="mode" data-mode="video" role="tab" aria-selected="false">Video</button></nav>
-        <div class="shutter-row"><button id="galleryThumbButton" class="gallery-thumb-button" type="button" aria-label="Open last photo"><span class="gallery-empty">▣</span><img id="galleryThumb" class="hidden" alt="Last captured photo"></button><button id="captureButton" class="shutter" type="button" aria-label="Take photo" disabled><span></span></button><button id="switchButton" class="flip-button" type="button" aria-label="Switch camera">↻</button></div>
-        <div class="secondary-tools"><button id="timerButton" class="tool-button" type="button" aria-label="Set timer" aria-pressed="false">Timer <span id="timerLabel">Off</span></button><button id="gridButton" class="tool-button" type="button" aria-label="Toggle grid" aria-pressed="false">Grid</button></div>
-      </div>
-    </section>
-    <section id="enhancer" class="enhancer hidden" aria-labelledby="enhancerHeading"><div class="section-heading"><div><p class="eyebrow">Local enhancement</p><h2 id="enhancerHeading">Make your photo pop</h2></div><button id="closeEnhancerButton" class="text-button" type="button">Close</button></div><div class="enhance-preview modal-preview"><img id="enhancedPreview" alt="Captured photo preview"></div><div class="enhance-actions"><button id="downloadButton" class="primary-button" type="button">Save photo</button></div><p id="enhanceStatus" class="helper-text">Processing locally… No photo leaves this device.</p></section>
-    <p id="errorMessage" class="error-message hidden" role="alert"></p>
-  </main>
-  <script type="module" src="./app.js?v=13"></script>
+
+<video id="preview" class="viewfinder" autoplay muted playsinline></video>
+<canvas id="fxCanvas" class="fx-canvas hidden"></canvas>
+<canvas id="captureCanvas" class="hidden"></canvas>
+
+<div class="topbar">
+  <div class="group">
+    <button id="flashButton" class="tbtn off" aria-pressed="false" title="Flash">
+      <span class="ico">&#9889;</span><span class="val" id="flashVal">off</span>
+    </button>
+    <button id="gridButton" class="tbtn off" aria-pressed="false" title="Grid">
+      <span class="ico">&#9638;</span>
+    </button>
+  </div>
+  <div class="brand">LUMEN<span class="storage-sub" id="storageIndicator">photos left</span></div>
+  <div class="group">
+    <button id="timerButton" class="tbtn off" aria-pressed="false" title="Timer">
+      <span class="ico">&#9201;</span><span class="val" id="timerLabel">off</span>
+    </button>
+  </div>
+</div>
+
+<div class="zoomwrap">
+  <span class="zlab" id="zoomLabel">1.0&times;</span>
+  <input id="zoomRange" type="range" min="1" max="1" step="0.1" value="1" disabled aria-label="Zoom">
+</div>
+
+<div id="gridOverlay" class="grid-overlay hidden" aria-hidden="true">
+  <span></span><span></span><span></span><span></span>
+</div>
+<div id="focusRing" class="focus-ring hidden" aria-hidden="true"></div>
+<div id="countdown" hidden></div>
+
+<div class="modeswitch" role="tablist" aria-label="Capture modes">
+  <button class="mode" data-mode="portrait" role="tab" aria-selected="false">Portrait</button>
+  <button class="mode active" data-mode="photo" role="tab" aria-selected="true">Photo</button>
+  <button class="mode" data-mode="night" role="tab" aria-selected="false">Night</button>
+</div>
+
+<div class="bottombar">
+  <button id="galleryThumbButton" class="gthumb" aria-label="Open last photo">
+    <span class="gallery-empty">&#128444;</span>
+    <img id="galleryThumb" class="hidden" alt="Last captured photo">
+  </button>
+  <button id="captureButton" class="shutter" aria-label="Take photo" disabled><span></span></button>
+  <button id="switchButton" class="bbtn" aria-label="Switch camera">&#8646;</button>
+</div>
+
+<div id="statusPill" class="status-pill" role="status">Camera off</div>
+
+<div id="previewPlaceholder" class="enable-wrap">
+  <h1>LUMEN</h1>
+  <p>On-device computational photography: adaptive burst, align-and-merge denoise, HDR bracketing &mdash; no cloud, no account.</p>
+  <button id="startButton" class="primary-btn">Start camera</button>
+  <p id="errorMessage" class="error-message hidden" role="alert"></p>
+</div>
+
+<div id="processing" hidden>
+  <div class="spinner"></div>
+  <div id="procStage">Capturing&hellip;</div>
+</div>
+<div id="flashZap"></div>
+<div id="toast"></div>
+
+<div id="viewerOverlay" class="viewer hidden" role="dialog" aria-modal="true" aria-label="Photo viewer">
+  <div class="viewer-top">
+    <button id="viewerClose" class="vbtn" aria-label="Close viewer">&#10005;</button>
+  </div>
+  <img id="viewerImage" alt="Captured photo">
+  <div class="viewer-actions">
+    <button id="viewerSave" class="vbtn wide">Save</button>
+    <button id="viewerShare" class="vbtn wide">Share</button>
+  </div>
+</div>
+
+<script src="./app.js?v=14"></script>
+<script src="./camera-pipeline.js?v=14"></script>
 </body>
 </html>

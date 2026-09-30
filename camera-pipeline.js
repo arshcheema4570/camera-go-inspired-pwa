@@ -17,15 +17,19 @@ const errorMessage = $("errorMessage");
 const countdown = $("countdown");
 const zoomRange = $("zoomRange");
 const zoomLabel = $("zoomLabel");
-const enhancer = $("enhancer");
-const enhancedPreview = $("enhancedPreview");
-const openEnhancerButton = $("openEnhancerButton");
-const closeEnhancerButton = $("closeEnhancerButton");
-const downloadButton = $("downloadButton");
-const enhanceStatus = $("enhanceStatus");
 const galleryThumb = $("galleryThumb");
 const galleryThumbButton = $("galleryThumbButton");
-const topModeStatus = $("topModeStatus");
+const flashVal = $("flashVal");
+const flashZap = $("flashZap");
+const toastEl = $("toast");
+const procEl = $("processing");
+const procStage = $("procStage");
+const viewerOverlay = $("viewerOverlay");
+const viewerImage = $("viewerImage");
+const viewerClose = $("viewerClose");
+const viewerSave = $("viewerSave");
+const viewerShare = $("viewerShare");
+let viewerObjectUrl = null;
 
 const MAX_WIDTH = 1280;
 const MAX_HEIGHT = 720;
@@ -48,13 +52,26 @@ let glTexture = null;
 let galleryObjectUrl = null;
 
 const setStatus = (text) => { statusPill.textContent = text; };
+const setStage = (text) => { procStage.textContent = text; };
+const showProc = (on) => { procEl.hidden = !on; };
+const toast = (msg, ms = 2800) => {
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => toastEl.classList.remove("show"), ms);
+};
+const fireFlash = () => {
+  flashZap.classList.remove("fire");
+  void flashZap.offsetWidth;
+  flashZap.classList.add("fire");
+};
 const showError = (text) => {
   errorMessage.textContent = text;
   errorMessage.classList.toggle("hidden", !text);
 };
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 worker.addEventListener("message", (event) => {
-  if (event.data.type === "status") setStatus(event.data.message);
+  if (event.data.type === "status") { setStatus(event.data.message); setStage(event.data.message); }
 });
 
 function explain(error) {
@@ -148,7 +165,6 @@ async function cameraStart() {
     setStatus(facingMode === "environment" ? "Rear camera ready" : "Front camera ready");
     const track = stream.getVideoTracks()[0];
     const settings = track.getSettings?.() || {};
-    document.documentElement.style.setProperty("--capture-ratio", `${settings.width || video.videoWidth} / ${settings.height || video.videoHeight}`);
     video.classList.add("live-feed");
     video.classList.toggle("mirrored", facingMode === "user");
     fxCanvas.classList.toggle("mirrored", facingMode === "user");
@@ -171,7 +187,7 @@ function stopCamera() {
 async function toggleFlash() {
   if (!stream) return;
   const track = stream.getVideoTracks()[0]; const on = track.getSettings().torch === true;
-  try { await track.applyConstraints({ advanced: [{ torch: !on }] }); flashButton.setAttribute("aria-pressed", String(!on)); }
+  try { await track.applyConstraints({ advanced: [{ torch: !on }] }); flashButton.setAttribute("aria-pressed", String(!on)); flashButton.classList.toggle("off", on); flashVal.textContent = !on ? "on" : "off"; }
   catch { showError("Flash is not available on this camera."); }
 }
 
@@ -215,31 +231,51 @@ async function captureBurst(count) {
 
 async function takePhoto() {
   if (!stream || !videoReady) return;
-  if (timerSeconds) { for (let n = timerSeconds; n > 0; n -= 1) { countdown.textContent = n; countdown.classList.remove("hidden"); await delay(1000); } countdown.classList.add("hidden"); }
+  if (timerSeconds) { for (let n = timerSeconds; n > 0; n -= 1) { countdown.textContent = n; countdown.hidden = false; await delay(1000); } countdown.hidden = true; }
   const count = mode === "night" ? Math.min(6, burstCount + 2) : mode === "portrait" ? Math.min(5, burstCount + 1) : burstCount;
   setStatus(`Capturing ${count}-frame ${mode} burst…`);
+  setStage("Capturing…"); showProc(true); fireFlash();
   captureButton.disabled = true;
   try {
     const result = await captureBurst(count);
     captureCanvas.width = result.width; captureCanvas.height = result.height;
-    document.documentElement.style.setProperty("--capture-ratio", `${result.width} / ${result.height}`);
     captureCanvas.getContext("2d").putImageData(new ImageData(result.data, result.width, result.height), 0, 0);
     const blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", 0.94));
     originalImage = await createImageBitmap(blob); processedBlob = blob;
     if (galleryObjectUrl) URL.revokeObjectURL(galleryObjectUrl);
     galleryObjectUrl = URL.createObjectURL(blob);
-    galleryThumb.src = galleryObjectUrl; galleryThumb.classList.remove("hidden"); $("galleryThumbButton").querySelector(".gallery-empty")?.classList.add("hidden");
+    galleryThumb.src = galleryObjectUrl; galleryThumb.classList.remove("hidden"); galleryThumbButton.querySelector(".gallery-empty")?.classList.add("hidden");
     if (result.elapsedMs > FRAME_BUDGET_MS) burstCount = Math.max(3, burstCount - 1); else if (burstCount < 6) burstCount += 1;
-    openEnhancerButton.disabled = false; openEnhancer();
-    enhanceStatus.textContent = `Processed locally in ${result.elapsedMs} ms · ${result.engine} · adaptive burst target: ${burstCount} frames`;
     setStatus(result.elapsedMs > FRAME_BUDGET_MS ? "Thermal guard active" : "Photo ready offline");
+    toast(`Processed locally in ${result.elapsedMs} ms`);
   } catch (error) { showError(`Photo processing failed: ${error.message}`); setStatus("Processing unavailable"); }
-  finally { captureButton.disabled = false; }
+  finally { captureButton.disabled = false; showProc(false); }
 }
 
-function openEnhancer() { enhancer.classList.remove("hidden"); enhancedPreview.src = URL.createObjectURL(processedBlob); enhancer.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
-function closeEnhancer() { enhancer.classList.add("hidden"); }
-function downloadPhoto() { if (!processedBlob) return; const url = URL.createObjectURL(processedBlob); const link = document.createElement("a"); link.href = url; link.download = `lumen-camera-${Date.now()}.jpg`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); enhanceStatus.textContent = "Saved to your Downloads folder."; }
+function openViewer() {
+  if (!processedBlob) return;
+  if (viewerObjectUrl) URL.revokeObjectURL(viewerObjectUrl);
+  viewerObjectUrl = URL.createObjectURL(processedBlob);
+  viewerImage.src = viewerObjectUrl;
+  viewerOverlay.classList.remove("hidden");
+}
+function closeViewer() { viewerOverlay.classList.add("hidden"); }
+function savePhoto() {
+  if (!processedBlob) return;
+  const url = URL.createObjectURL(processedBlob);
+  const link = document.createElement("a");
+  link.href = url; link.download = `lumen-camera-${Date.now()}.jpg`; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("Photo saved");
+}
+async function sharePhoto() {
+  if (!processedBlob) return;
+  const file = new File([processedBlob], `lumen-camera-${Date.now()}.jpg`, { type: "image/jpeg" });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return; } catch { /* dismissed */ }
+  }
+  savePhoto();
+}
 
 startButton.onclick = cameraStart;
 captureButton.onclick = takePhoto;
@@ -247,13 +283,13 @@ switchButton.onclick = () => { facingMode = facingMode === "environment" ? "user
 flashButton.onclick = toggleFlash;
 zoomRange.oninput = setZoom;
 video.onclick = showFocus;
-gridButton.onclick = () => { const on = !gridOverlay.classList.toggle("hidden"); gridButton.setAttribute("aria-pressed", String(on)); };
-timerButton.onclick = () => { timerSeconds = timerSeconds === 0 ? 3 : timerSeconds === 3 ? 10 : 0; timerLabel.textContent = timerSeconds ? `${timerSeconds}s` : "Off"; timerButton.setAttribute("aria-pressed", String(Boolean(timerSeconds))); };
-document.querySelectorAll(".mode").forEach((button) => button.onclick = () => { document.querySelectorAll(".mode").forEach((item) => { item.classList.remove("active"); item.setAttribute("aria-selected", "false"); }); button.classList.add("active"); button.setAttribute("aria-selected", "true"); mode = button.dataset.mode; topModeStatus.textContent = button.textContent; setStatus(`${button.textContent} mode`); });
+gridButton.onclick = () => { const on = !gridOverlay.classList.toggle("hidden"); gridButton.setAttribute("aria-pressed", String(on)); gridButton.classList.toggle("off", !on); };
+timerButton.onclick = () => { timerSeconds = timerSeconds === 0 ? 3 : timerSeconds === 3 ? 10 : 0; timerLabel.textContent = timerSeconds ? `${timerSeconds}s` : "Off"; timerButton.setAttribute("aria-pressed", String(Boolean(timerSeconds))); timerButton.classList.toggle("off", !timerSeconds); };
+document.querySelectorAll(".mode").forEach((button) => button.onclick = () => { document.querySelectorAll(".mode").forEach((item) => { item.classList.remove("active"); item.setAttribute("aria-selected", "false"); }); button.classList.add("active"); button.setAttribute("aria-selected", "true"); mode = button.dataset.mode; setStatus(`${button.textContent} mode`); });
 document.querySelectorAll(".zoom-shortcut").forEach((button) => button.onclick = () => { zoomRange.value = button.dataset.zoom; zoomRange.dispatchEvent(new Event("input")); document.querySelectorAll(".zoom-shortcut").forEach((item) => item.classList.toggle("active", item === button)); });
-galleryThumbButton.onclick = () => { if (processedBlob) openEnhancer(); };
-openEnhancerButton.onclick = openEnhancer;
-closeEnhancerButton.onclick = closeEnhancer;
-downloadButton.onclick = downloadPhoto;
+galleryThumbButton.onclick = openViewer;
+viewerClose.onclick = closeViewer;
+viewerSave.onclick = savePhoto;
+viewerShare.onclick = sharePhoto;
 window.addEventListener("beforeunload", stopCamera);
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
