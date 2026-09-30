@@ -23,6 +23,9 @@ const openEnhancerButton = $("openEnhancerButton");
 const closeEnhancerButton = $("closeEnhancerButton");
 const downloadButton = $("downloadButton");
 const enhanceStatus = $("enhanceStatus");
+const galleryThumb = $("galleryThumb");
+const galleryThumbButton = $("galleryThumbButton");
+const topModeStatus = $("topModeStatus");
 
 const MAX_WIDTH = 1280;
 const MAX_HEIGHT = 720;
@@ -42,6 +45,7 @@ let liveFrame = 0;
 let gl = null;
 let glProgram = null;
 let glTexture = null;
+let galleryObjectUrl = null;
 
 const setStatus = (text) => { statusPill.textContent = text; };
 const showError = (text) => {
@@ -142,11 +146,12 @@ async function cameraStart() {
     videoReady = true;
     placeholder.classList.add("hidden"); captureButton.disabled = false;
     setStatus(facingMode === "environment" ? "Rear camera ready" : "Front camera ready");
-    document.documentElement.style.setProperty("--capture-ratio", `${video.videoWidth} / ${video.videoHeight}`);
+    const track = stream.getVideoTracks()[0];
+    const settings = track.getSettings?.() || {};
+    document.documentElement.style.setProperty("--capture-ratio", `${settings.width || video.videoWidth} / ${settings.height || video.videoHeight}`);
     video.classList.add("live-feed");
     video.classList.toggle("mirrored", facingMode === "user");
     fxCanvas.classList.toggle("mirrored", facingMode === "user");
-    const track = stream.getVideoTracks()[0];
     const caps = track.getCapabilities?.() || {};
     flashButton.disabled = !caps.torch;
     if (caps.zoom) { zoomRange.disabled = false; zoomRange.min = caps.zoom.min || 1; zoomRange.max = Math.min(caps.zoom.max || 1, 4); zoomRange.step = caps.zoom.step || 0.1; zoomRange.value = track.getSettings().zoom || caps.zoom.min || 1; zoomLabel.textContent = `${Number(zoomRange.value).toFixed(1)}×`; }
@@ -221,6 +226,9 @@ async function takePhoto() {
     captureCanvas.getContext("2d").putImageData(new ImageData(result.data, result.width, result.height), 0, 0);
     const blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", 0.94));
     originalImage = await createImageBitmap(blob); processedBlob = blob;
+    if (galleryObjectUrl) URL.revokeObjectURL(galleryObjectUrl);
+    galleryObjectUrl = URL.createObjectURL(blob);
+    galleryThumb.src = galleryObjectUrl; galleryThumb.classList.remove("hidden"); $("galleryThumbButton").querySelector(".gallery-empty")?.classList.add("hidden");
     if (result.elapsedMs > FRAME_BUDGET_MS) burstCount = Math.max(3, burstCount - 1); else if (burstCount < 6) burstCount += 1;
     openEnhancerButton.disabled = false; openEnhancer();
     enhanceStatus.textContent = `Processed locally in ${result.elapsedMs} ms · ${result.engine} · adaptive burst target: ${burstCount} frames`;
@@ -241,7 +249,9 @@ zoomRange.oninput = setZoom;
 video.onclick = showFocus;
 gridButton.onclick = () => { const on = !gridOverlay.classList.toggle("hidden"); gridButton.setAttribute("aria-pressed", String(on)); };
 timerButton.onclick = () => { timerSeconds = timerSeconds === 0 ? 3 : timerSeconds === 3 ? 10 : 0; timerLabel.textContent = timerSeconds ? `${timerSeconds}s` : "Off"; timerButton.setAttribute("aria-pressed", String(Boolean(timerSeconds))); };
-document.querySelectorAll(".mode").forEach((button) => button.onclick = () => { document.querySelectorAll(".mode").forEach((item) => { item.classList.remove("active"); item.setAttribute("aria-selected", "false"); }); button.classList.add("active"); button.setAttribute("aria-selected", "true"); mode = button.dataset.mode; setStatus(`${button.textContent} mode`); });
+document.querySelectorAll(".mode").forEach((button) => button.onclick = () => { document.querySelectorAll(".mode").forEach((item) => { item.classList.remove("active"); item.setAttribute("aria-selected", "false"); }); button.classList.add("active"); button.setAttribute("aria-selected", "true"); mode = button.dataset.mode; topModeStatus.textContent = button.textContent; setStatus(`${button.textContent} mode`); });
+document.querySelectorAll(".zoom-shortcut").forEach((button) => button.onclick = () => { zoomRange.value = button.dataset.zoom; zoomRange.dispatchEvent(new Event("input")); document.querySelectorAll(".zoom-shortcut").forEach((item) => item.classList.toggle("active", item === button)); });
+galleryThumbButton.onclick = () => { if (processedBlob) openEnhancer(); };
 openEnhancerButton.onclick = openEnhancer;
 closeEnhancerButton.onclick = closeEnhancer;
 downloadButton.onclick = downloadPhoto;
