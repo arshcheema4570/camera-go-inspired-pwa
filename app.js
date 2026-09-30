@@ -77,7 +77,7 @@ function initLiveShader() {
   gl = fxCanvas.getContext("webgl", { alpha: false, antialias: false, powerPreference: "low-power" });
   if (!gl) return;
   const vertex = `attribute vec2 position; varying vec2 uv; void main(){ uv=(position+1.0)*0.5; gl_Position=vec4(position,0.0,1.0); }`;
-  const fragment = `precision mediump float; varying vec2 uv; uniform sampler2D frame; uniform vec2 texel; void main(){ vec3 c=texture2D(frame,uv).rgb; vec3 l=(texture2D(frame,uv+vec2(texel.x,0.0)).rgb+texture2D(frame,uv-vec2(texel.x,0.0)).rgb+texture2D(frame,uv+vec2(0.0,texel.y)).rgb+texture2D(frame,uv-vec2(0.0,texel.y)).rgb)*0.25; c += (c-l)*0.28; c=(c-0.5)*1.08+0.5; c=max(c,vec3(0.0)); c=1.0-(1.0-c)*(1.0-c)*0.10; gl_FragColor=vec4(c,1.0); }`;
+  const fragment = `precision mediump float; varying vec2 uv; uniform sampler2D frame; uniform vec2 texel; void main(){ vec3 c=texture2D(frame,uv).rgb; vec3 l=(texture2D(frame,uv+vec2(texel.x,0.0)).rgb+texture2D(frame,uv-vec2(texel.x,0.0)).rgb+texture2D(frame,uv+vec2(0.0,texel.y)).rgb+texture2D(frame,uv-vec2(0.0,texel.y)).rgb)*0.25; c += (c-l)*0.20; c=(c-0.5)*1.06+0.5; c=max(c,vec3(0.0)); c=pow(c,vec3(1.08))*0.97; gl_FragColor=vec4(c,1.0); }`;
   const compile = (type, source) => {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, source);
@@ -139,6 +139,8 @@ async function cameraStart() {
     videoReady = true;
     placeholder.classList.add("hidden"); captureButton.disabled = false;
     setStatus(facingMode === "environment" ? "Rear camera ready" : "Front camera ready");
+    document.documentElement.style.setProperty("--capture-ratio", `${video.videoWidth} / ${video.videoHeight}`);
+    video.classList.add("live-feed");
     video.classList.toggle("mirrored", facingMode === "user");
     fxCanvas.classList.toggle("mirrored", facingMode === "user");
     const track = stream.getVideoTracks()[0];
