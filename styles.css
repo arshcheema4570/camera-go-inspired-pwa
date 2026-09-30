@@ -1,6 +1,8 @@
 
-/* v10 visual sync: keep the live frame and captured result on the same geometry */
-.preview-wrap{aspect-ratio:var(--capture-ratio,16 / 9)}
-.preview-wrap video.live-feed{filter:contrast(1.06) brightness(.94) saturate(1.04)}
-.enhance-preview{aspect-ratio:var(--capture-ratio,16 / 9);max-height:none}
-.enhance-preview img{height:100%;max-height:none;object-fit:cover}
+/* v12 LiteRT sync: both surfaces share one runtime camera ratio and tone profile */
+.preview-wrap,.enhance-preview{aspect-ratio:var(--capture-ratio,4 / 3);overflow:hidden;background:#000}
+.preview-wrap video,.fx-canvas,.enhance-preview img{width:100%;height:100%;object-fit:cover}
+.preview-wrap video.live-feed{filter:contrast(1.1) brightness(.96) saturate(1.08)}
+.preview-wrap video.mirrored,.fx-canvas.mirrored,.enhance-preview img.mirrored{transform:scaleX(-1)}
+.enhance-preview{max-height:none}
+.enhance-preview img{max-height:none}
