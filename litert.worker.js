@@ -50,6 +50,51 @@ function resize(image, targetWidth = 0, targetHeight = 0) {
   return { width, height, data };
 }
 
+/* Post-merge denoise, applied to the merged/fused frame (so both the WebGL
+   and CPU finishing paths benefit from a single implementation):
+   - Chroma denoise: Co/Cg chroma blurred heavily (r=8); luma untouched.
+     Noise is far more visible in chroma than luma, so this is the
+     cheapest large perceptual win.
+   - Single-frame spatial denoise: when only one frame exists (takePhoto
+     partially failed — the multi-frame paths already have temporal
+     denoise), a small 3x3 edge-preserving bilateral on luma. Alpha
+     (the noise-adaptive sharpen gate) is preserved throughout. */
+function denoiseMerged(data, width, height, single) {
+  const n = width * height;
+  const Y = new Float32Array(n), Co = new Float32Array(n), Cg = new Float32Array(n);
+  for (let p = 0; p < n; p += 1) {
+    const i4 = p * 4;
+    const r = data[i4] / 255, g = data[i4 + 1] / 255, b = data[i4 + 2] / 255;
+    Y[p] = r * 0.25 + g * 0.5 + b * 0.25;
+    Co[p] = r * 0.5 - b * 0.5;
+    Cg[p] = -r * 0.25 + g * 0.5 - b * 0.25;
+  }
+  if (single) {
+    const out = new Float32Array(n);
+    const ss2 = 2 * 1.2 * 1.2, sr2 = 2 * 0.11 * 0.11; // spatial sigma 1.2px, range sigma ~28/255
+    for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+      const p = y * width + x, yc = Y[p];
+      let s = 0, sw = 0;
+      for (let dy = -1; dy <= 1; dy += 1) for (let dx = -1; dx <= 1; dx += 1) {
+        const xx = Math.min(width - 1, Math.max(0, x + dx)), yy = Math.min(height - 1, Math.max(0, y + dy));
+        const q = yy * width + xx, dd = Y[q] - yc;
+        const wt = Math.exp(-(dx * dx + dy * dy) / ss2 - (dd * dd) / sr2);
+        s += Y[q] * wt; sw += wt;
+      }
+      out[p] = s / sw;
+    }
+    Y.set(out);
+  }
+  const CoB = blurLumaSeparable(Co, width, height, 8);
+  const CgB = blurLumaSeparable(Cg, width, height, 8);
+  for (let p = 0; p < n; p += 1) {
+    const i4 = p * 4, y = Y[p], co = CoB[p], cg = CgB[p];
+    data[i4] = (y + co - cg) * 255;
+    data[i4 + 1] = (y + cg) * 255;
+    data[i4 + 2] = (y - co - cg) * 255;
+  }
+}
+
 /* ------------------------------------------------------------------
    Translational frame registration.
    Handheld burst frames are offset by a few pixels of micro-jitter.
@@ -106,7 +151,9 @@ function estimateShiftCoarse(refLuma, tgtLuma, width, height) {
 function estimateShiftFine(refLuma, tgtLuma, width, height, estX, estY) {
   // 1-px refinement on stride-8 samples (whole-frame coverage, cheap).
   // Early termination: abandon a candidate as soon as it exceeds the best SAD.
-  const stride = 8, range = 10;
+  // Above 8MP (hardware stills) use stride 16 — shift precision stays 1px,
+  // only the SAD sampling density drops.
+  const stride = width * height > 8000000 ? 16 : 8, range = 10;
   const cx = Math.round(estX), cy = Math.round(estY);
   let bestDx = cx, bestDy = cy, bestSad = Infinity;
   for (let dy = -range; dy <= range; dy += 1) for (let dx = -range; dx <= range; dx += 1) {
@@ -126,38 +173,137 @@ function estimateShiftFine(refLuma, tgtLuma, width, height, estX, estY) {
   return [bestDx, bestDy];
 }
 
-function merge(frames, mode) {
-  const base = frames[0];
-  const { width, height } = base;
-  const data = new Uint8ClampedArray(base.data);
-  const threshold = mode === "night" ? 42 : 30;
-  // Register every frame to the base frame; frame 0 needs no shift.
-  const shifts = [[0, 0]];
+/* Merge with exposure bracketing + noise-adaptive soft weighting.
+
+   Frames carry per-frame EVs (0 when bracketing is unsupported). Frames are
+   grouped by EV; the group whose EV is closest to 0 is the registration
+   reference. Within each EV group, frames are combined with soft robust
+   (Cauchy) weights w = 1/(1+(d/d0)^2) against the group's own reference
+   frame — a smooth generalization of the old binary include/exclude gate:
+   sensor noise (small d) averages fully, ghosts (large d) fade to ~0
+   without a hard cutoff. The per-pixel temporal std of luma feeds a
+   noise-adaptive sharpen gate, packed into the alpha channel
+   (byte = clamp(gate/0.1)*255) for the finishing stage.
+
+   Across EV groups, Mertens-style exposure fusion merges the best-exposed
+   parts of each: weight = wellExposedness * (contrast + e) * (saturation + e),
+   normalized per pixel. When all EVs are equal this degrades gracefully to
+   plain temporal averaging. */
+function merge(frames, evs, mode) {
+  const { width, height } = frames[0];
+  const n = width * height;
+  const evKeys = frames.map((f, i) => Math.round(((evs && evs[i]) || 0) * 10));
+  const uniqEvs = [...new Set(evKeys)].sort((a, b) => a - b);
+  let refKey = uniqEvs[0];
+  for (const k of uniqEvs) if (Math.abs(k) < Math.abs(refKey)) refKey = k;
+  const refIdx = evKeys.indexOf(refKey);
+
+  // Register every frame to the reference frame; reference needs no shift.
+  const shifts = new Array(frames.length).fill(null);
+  shifts[refIdx] = [0, 0];
   if (frames.length > 1) {
-    const baseLuma = lumaFull(base.data, width, height);
-    for (let k = 1; k < frames.length; k += 1) {
+    const refLuma = lumaFull(frames[refIdx].data, width, height);
+    for (let k = 0; k < frames.length; k += 1) {
+      if (k === refIdx) continue;
       const tgtLuma = lumaFull(frames[k].data, width, height);
-      const [cx, cy] = estimateShiftCoarse(baseLuma, tgtLuma, width, height);
-      shifts.push(estimateShiftFine(baseLuma, tgtLuma, width, height, cx, cy));
+      const [cx, cy] = estimateShiftCoarse(refLuma, tgtLuma, width, height);
+      shifts[k] = estimateShiftFine(refLuma, tgtLuma, width, height, cx, cy);
     }
   }
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const i = (y * width + x) * 4;
-      let r = 0, g = 0, b = 0, count = 0;
-      for (let k = 0; k < frames.length; k += 1) {
-        const [sx, sy] = shifts[k];
-        const tx = x + sx, ty = y + sy;
-        if (tx < 0 || tx >= width || ty < 0 || ty >= height) continue;
-        const t = (ty * width + tx) * 4;
-        const frame = frames[k];
-        const delta = Math.abs(frame.data[t] - base.data[i]) + Math.abs(frame.data[t + 1] - base.data[i + 1]) + Math.abs(frame.data[t + 2] - base.data[i + 2]);
-        if (delta < threshold) { r += frame.data[t]; g += frame.data[t + 1]; b += frame.data[t + 2]; count += 1; }
+
+  const threshold = mode === "night" ? 42 : 30;
+  const d02 = threshold * threshold;
+  const gateBase = mode === "night" ? 0.035 : 0.016;
+  const GATE_K = 0.006, GATE_SCALE = 0.1;
+  const groups = [];
+
+  for (const key of uniqEvs) {
+    const idxs = evKeys.map((k, i) => (k === key ? i : -1)).filter((i) => i >= 0);
+    const gRef = frames[idxs[0]].data; // group's own reference (same EV)
+    const acc = new Float32Array(n * 3);
+    // Pass 1: soft-weighted temporal mean vs the group's reference frame.
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const p = y * width + x, i3 = p * 3, i4 = p * 4;
+        let sr = 0, sg = 0, sb = 0, sw = 0;
+        for (const k of idxs) {
+          const sh = shifts[k];
+          const tx = x + sh[0], ty = y + sh[1];
+          if (tx < 0 || tx >= width || ty < 0 || ty >= height) continue;
+          const t = (ty * width + tx) * 4, f = frames[k].data;
+          const d = Math.abs(f[t] - gRef[i4]) + Math.abs(f[t + 1] - gRef[i4 + 1]) + Math.abs(f[t + 2] - gRef[i4 + 2]);
+          const w = 1 / (1 + (d * d) / d02);
+          sr += f[t] * w; sg += f[t + 1] * w; sb += f[t + 2] * w; sw += w;
+        }
+        if (sw > 0) { acc[i3] = sr / sw; acc[i3 + 1] = sg / sw; acc[i3 + 2] = sb / sw; }
+        else { acc[i3] = gRef[i4]; acc[i3 + 1] = gRef[i4 + 1]; acc[i3 + 2] = gRef[i4 + 2]; }
       }
-      if (count) { data[i] = r / count; data[i + 1] = g / count; data[i + 2] = b / count; }
     }
+    // Pass 2: temporal std of luma -> per-pixel noise-adaptive sharpen gate.
+    const gate = new Uint8Array(n);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const p = y * width + x, i3 = p * 3, i4 = p * 4;
+        const lm = acc[i3] * 0.299 + acc[i3 + 1] * 0.587 + acc[i3 + 2] * 0.114;
+        let v = 0, sw = 0;
+        for (const k of idxs) {
+          const sh = shifts[k];
+          const tx = x + sh[0], ty = y + sh[1];
+          if (tx < 0 || tx >= width || ty < 0 || ty >= height) continue;
+          const t = (ty * width + tx) * 4, f = frames[k].data;
+          const d = Math.abs(f[t] - gRef[i4]) + Math.abs(f[t + 1] - gRef[i4 + 1]) + Math.abs(f[t + 2] - gRef[i4 + 2]);
+          const w = 1 / (1 + (d * d) / d02);
+          const l = f[t] * 0.299 + f[t + 1] * 0.587 + f[t + 2] * 0.114;
+          v += w * (l - lm) * (l - lm); sw += w;
+        }
+        const s = sw > 0 ? Math.sqrt(v / sw) : 0;
+        gate[p] = Math.round(Math.min(1, (gateBase + s * GATE_K) / GATE_SCALE) * 255);
+      }
+    }
+    const data = new Uint8ClampedArray(n * 4);
+    for (let p = 0; p < n; p += 1) {
+      const i4 = p * 4, i3 = p * 3;
+      data[i4] = acc[i3]; data[i4 + 1] = acc[i3 + 1]; data[i4 + 2] = acc[i3 + 2]; data[i4 + 3] = gate[p];
+    }
+    groups.push({ data });
   }
-  return { width, height, data };
+
+  // Single EV: the group image is the merge (alpha already holds the gate).
+  if (groups.length === 1) return { width, height, data: groups[0].data };
+
+  // Exposure fusion across EV groups: keep the best-exposed parts of each.
+  const gLumas = groups.map((gr) => {
+    const l = new Float32Array(n);
+    for (let p = 0; p < n; p += 1) {
+      const i4 = p * 4;
+      l[p] = (gr.data[i4] * 0.299 + gr.data[i4 + 1] * 0.587 + gr.data[i4 + 2] * 0.114) / 255;
+    }
+    return l;
+  });
+  const gBlurs = gLumas.map((l) => blurLumaSeparable(l, width, height, 2));
+  const out = new Uint8ClampedArray(n * 4);
+  for (let p = 0; p < n; p += 1) {
+    const i4 = p * 4;
+    const ws = new Array(groups.length);
+    let wsum = 0;
+    for (let gi = 0; gi < groups.length; gi += 1) {
+      const d = groups[gi].data, l = gLumas[gi][p];
+      const dl = l - 0.5;
+      const we = Math.exp(-(dl * dl) / 0.08); // well-exposedness, sigma 0.2
+      const contrast = Math.abs(l - gBlurs[gi][p]);
+      const r = d[i4] / 255, gg = d[i4 + 1] / 255, b = d[i4 + 2] / 255;
+      const sat = Math.max(r, gg, b) - Math.min(r, gg, b);
+      const w = we * (contrast + 0.03) * (sat + 0.10);
+      ws[gi] = w; wsum += w;
+    }
+    let r = 0, g = 0, b = 0, ga = 0;
+    for (let gi = 0; gi < groups.length; gi += 1) {
+      const w = ws[gi] / wsum, d = groups[gi].data;
+      r += d[i4] * w; g += d[i4 + 1] * w; b += d[i4 + 2] * w; ga += d[i4 + 3] * w;
+    }
+    out[i4] = r; out[i4 + 1] = g; out[i4 + 2] = b; out[i4 + 3] = ga;
+  }
+  return { width, height, data: out };
 }
 
 /* ------------------------------------------------------------------
@@ -179,9 +325,11 @@ const STYLES = {
     contrast: 1.07,
     tempR: 1.018, tempB: 0.992,
     saturation: 1.07,
-    microAmt: 0.5,
-    sharpAmt: 1.0, nightSharpAmt: 0.55,
-    sharpGate: 0.016, nightSharpGate: 0.035,
+    microAmt: 0.4,
+    sharpAmt: 0.6, nightSharpAmt: 0.5,
+
+    clarityAmt: 0.35, haloGate: 0.08,
+    edgeRef: 0.12, sharpBase: 0.15,
     vibrance: 0.10,
   },
   pixel: {
@@ -191,9 +339,11 @@ const STYLES = {
     contrast: 1.15,
     tempR: 0.996, tempB: 1.008,
     saturation: 1.05,
-    microAmt: 0.7,
-    sharpAmt: 1.0, nightSharpAmt: 0.55,
-    sharpGate: 0.016, nightSharpGate: 0.035,
+    microAmt: 0.55,
+    sharpAmt: 0.6, nightSharpAmt: 0.5,
+
+    clarityAmt: 0.35, haloGate: 0.08,
+    edgeRef: 0.12, sharpBase: 0.15,
     vibrance: 0.15,
   },
 };
@@ -292,21 +442,31 @@ function fallback(image, mode = "photo", style = "iphone") {
   // Pass 2: blurred luma neighborhood (structure + ambiance local contrast)
   const blur = blurLumaSeparable(luma, width, height, 2);
 
-  // Pass 3: micro-contrast + gated edge sharpening + vibrance
+  // Pass 3: clarity (medium-scale local contrast, halo-clamped) +
+  // micro-contrast + gradient-weighted, noise-gated edge sharpening + vibrance.
+  // The sharpen gate is per-pixel, from the merge's temporal-variance estimate
+  // packed in the alpha channel (byte = clamp(gate/0.1)*255).
   const sharpAmt = mode === "night" ? S.nightSharpAmt : S.sharpAmt;
-  const sharpGate = mode === "night" ? S.nightSharpGate : S.sharpGate;
+  const blurMed = blurLumaSeparable(luma, width, height, 8);
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const i = y * width + x;
       const o = i * 4;
       const l = luma[i];
-      const micro = (l - blur[i]) * S.microAmt;
       const xm = x > 0 ? i - 1 : i, xp = x < width - 1 ? i + 1 : i;
       const ym = y > 0 ? i - width : i, yp = y < height - 1 ? i + width : i;
       const neigh = (luma[xm] + luma[xp] + luma[ym] + luma[yp]) * 0.25;
-      let sharp = (l - neigh) * sharpAmt;
-      if (sharp > -sharpGate && sharp < sharpGate) sharp = 0;
-      const delta = micro + sharp;
+      const gx = luma[xp] - luma[xm], gy = luma[yp] - luma[ym];
+      const edgeW = Math.min(1, Math.sqrt(gx * gx + gy * gy) / S.edgeRef);
+      // Detail enhancement follows edge presence: in flat noisy areas the
+      // gradient is just noise, so micro-contrast is scaled down and the
+      // sharpening (already noise-gated via alpha) drops to a low floor.
+      const micro = (l - blur[i]) * S.microAmt * Math.max(0.2, Math.min(1, edgeW * 2));
+      const clar = Math.max(-S.haloGate, Math.min(S.haloGate, (l - blurMed[i]) * S.clarityAmt));
+      let sharp = (l - neigh) * sharpAmt * (S.sharpBase + (1 - S.sharpBase) * edgeW);
+      const gate = (data[o + 3] / 255) * 0.1;
+      if (sharp > -gate && sharp < gate) sharp = 0;
+      const delta = micro + sharp + clar;
       const r = out[o] / 255, g = out[o + 1] / 255, b = out[o + 2] / 255;
       const sat = Math.max(r, g, b) - Math.min(r, g, b);
       const vib = 1 + (1 - Math.min(1, sat * 2.4)) * S.vibrance;
@@ -365,11 +525,12 @@ async function neural(image) {
 }
 
 self.onmessage = async (event) => {
-  const { id, frames, mode, style, finish } = event.data;
+  const { id, frames, evs, mode, style, finish } = event.data;
   const started = performance.now();
   try {
     await initialize();
-    const merged = merge(frames, mode);
+    const merged = merge(frames, evs, mode);
+    denoiseMerged(merged.data, merged.width, merged.height, frames.length === 1);
     if (!runner && finish === "webgl") {
       // WebGL finishing runs on the main thread: hand over the merged frame
       // plus specular WB gains and fully-resolved style params. The CPU
@@ -384,7 +545,8 @@ self.onmessage = async (event) => {
         tempR: S.tempR, tempB: S.tempB, saturation: S.saturation,
         microAmt: S.microAmt,
         sharpAmt: mode === "night" ? S.nightSharpAmt : S.sharpAmt,
-        sharpGate: mode === "night" ? S.nightSharpGate : S.sharpGate,
+        clarityAmt: S.clarityAmt, haloGate: S.haloGate,
+        edgeRef: S.edgeRef, sharpBase: S.sharpBase,
         vibrance: S.vibrance,
       };
       const elapsedMs = Math.round(performance.now() - started);
@@ -395,7 +557,7 @@ self.onmessage = async (event) => {
     const elapsedMs = Math.round(performance.now() - started);
     self.postMessage({ id, type: "result", width: image.width, height: image.height, data: image.data, elapsedMs, engine, status }, [image.data.buffer]);
   } catch (error) {
-    const merged = merge(frames, mode); const data = fallback(merged, mode, style);
+    const merged = merge(frames, evs, mode); const data = fallback(merged, mode, style);
     self.postMessage({ id, type: "result", width: merged.width, height: merged.height, data, elapsedMs: Math.round(performance.now() - started), engine: "Fallback", status: "FALLBACK_MODE", warning: error.message }, [data.buffer]);
   }
 };

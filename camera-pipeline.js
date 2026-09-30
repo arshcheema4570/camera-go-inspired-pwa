@@ -181,8 +181,14 @@ function renderLiveFrame() {
                                    saturation; output clamped to [0,1])
      blurH: tone luma -5px-> FBO  (separable 5-tap box blur, radius 2 —
      blurV: blurH -5px-> FBO        matches CPU blurLumaSeparable exactly)
-     comp : tone + blurred luma -> canvas (micro-contrast, gated edge
-                                          sharpening, vibrance)
+     blurMedH/blurMedV: tone luma -> FBO (separable 9-tap sparse blur,
+                        ~radius 8 clarity band; CPU uses blurLumaSeparable
+                        r=8 — same scale, slightly different kernel shape)
+     comp : tone + blurred luma -> canvas (micro-contrast, clarity,
+            gradient-weighted noise-gated edge sharpening, vibrance)
+   The sharpen gate is per-pixel, packed by the worker into the merged
+   frame's alpha channel (byte = clamp(gate/0.1)*255); the tone pass
+   preserves source alpha so the composite can read it.
    Any GL failure throws and the caller falls back to worker CPU
    finishing of the same burst — capture never breaks on GL issues.
    The GL path is used up to 4K (3840x2160); larger captures (e.g. 12MP
@@ -221,7 +227,7 @@ const FINISH_TONE_FRAG = FINISH_HEAD + [
   "  c.r *= tempR; c.b *= tempB;",
   "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));",
   "  c = l + (c - l) * saturation;",
-  "  gl_FragColor = vec4(clamp(c, 0.0, 1.5) / TONE_SCALE, 1.0);",
+  "  gl_FragColor = vec4(clamp(c, 0.0, 1.5) / TONE_SCALE, texture2D(src, uv).a);",
   "}",
 ].join("\n");
 const FINISH_BLUR_FRAG = FINISH_HEAD + [
@@ -235,26 +241,50 @@ const FINISH_BLUR_FRAG = FINISH_HEAD + [
   "  gl_FragColor = vec4(l, l, l, 1.0);",
   "}",
 ].join("\n");
+const FINISH_BLURMED_FRAG = FINISH_HEAD + [
+  "uniform sampler2D src;",
+  "uniform vec2 texel;",
+  "void main(){",
+  "  vec3 c = texture2D(src, uv).rgb;",
+  "  c += texture2D(src, uv + texel * 2.0).rgb + texture2D(src, uv - texel * 2.0).rgb;",
+  "  c += texture2D(src, uv + texel * 4.0).rgb + texture2D(src, uv - texel * 4.0).rgb;",
+  "  c += texture2D(src, uv + texel * 6.0).rgb + texture2D(src, uv - texel * 6.0).rgb;",
+  "  c += texture2D(src, uv + texel * 8.0).rgb + texture2D(src, uv - texel * 8.0).rgb;",
+  "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722)) / 9.0 * TONE_SCALE;",
+  "  gl_FragColor = vec4(l, l, l, 1.0);",
+  "}",
+].join("\n");
 const FINISH_COMP_FRAG = FINISH_HEAD + [
   "uniform sampler2D tone;",
   "uniform sampler2D blurLuma;",
+  "uniform sampler2D blurMed;",
   "uniform vec2 texel;",
   "uniform float microAmt;",
   "uniform float sharpAmt;",
-  "uniform float sharpGate;",
+  "uniform float clarityAmt;",
+  "uniform float haloGate;",
+  "uniform float edgeRef;",
+  "uniform float sharpBase;",
   "uniform float vibrance;",
   "float tl(vec2 p){ return dot(texture2D(tone, p).rgb * TONE_SCALE, vec3(0.2126, 0.7152, 0.0722)); }",
   "void main(){",
-  "  vec3 tc = texture2D(tone, uv).rgb * TONE_SCALE;",
+  "  vec4 t4 = texture2D(tone, uv);",
+  "  vec3 tc = t4.rgb * TONE_SCALE;",
   "  vec3 c = min(tc, vec3(1.0));",
   "  float l = dot(tc, vec3(0.2126, 0.7152, 0.0722));",
   "  float b = texture2D(blurLuma, uv).r;",
-  "  float micro = (l - b) * microAmt;",
+  "  float bm = texture2D(blurMed, uv).r;",
+  "  float gx = tl(uv + vec2(texel.x, 0.0)) - tl(uv - vec2(texel.x, 0.0));",
+  "  float gy = tl(uv + vec2(0.0, texel.y)) - tl(uv - vec2(0.0, texel.y));",
+  "  float edgeW = clamp(sqrt(gx * gx + gy * gy) / edgeRef, 0.0, 1.0);",
+  "  float micro = (l - b) * microAmt * max(0.2, min(1.0, edgeW * 2.0));",
+  "  float clar = clamp((l - bm) * clarityAmt, -haloGate, haloGate);",
   "  float ln = (tl(uv + vec2(texel.x, 0.0)) + tl(uv - vec2(texel.x, 0.0))",
   "            + tl(uv + vec2(0.0, texel.y)) + tl(uv - vec2(0.0, texel.y))) * 0.25;",
-  "  float sharp = (l - ln) * sharpAmt;",
-  "  if (abs(sharp) < sharpGate) sharp = 0.0;",
-  "  float delta = micro + sharp;",
+  "  float sharp = (l - ln) * sharpAmt * (sharpBase + (1.0 - sharpBase) * edgeW);",
+  "  float gate = t4.a * 0.1;",
+  "  if (abs(sharp) < gate) sharp = 0.0;",
+  "  float delta = micro + sharp + clar;",
   "  float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);",
   "  float vib = 1.0 + (1.0 - min(1.0, sat * 2.4)) * vibrance;",
   "  gl_FragColor = vec4(clamp(l + (c - l) * vib + delta, 0.0, 1.0), 1.0);",
@@ -305,6 +335,7 @@ function initFinishGL(width, height) {
     if (!gl) throw new Error("WebGL context creation failed");
     const progTone = finishProgram(gl, FINISH_TONE_FRAG);
     const progBlur = finishProgram(gl, FINISH_BLUR_FRAG);
+    const progBlurMed = finishProgram(gl, FINISH_BLURMED_FRAG);
     const progComp = finishProgram(gl, FINISH_COMP_FRAG);
     const quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, quad);
@@ -312,11 +343,12 @@ function initFinishGL(width, height) {
     const loc = (p, n) => gl.getUniformLocation(p, n);
     finishGL = {
       gl, canvas, maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
-      prog: { tone: progTone, blur: progBlur, comp: progComp },
+      prog: { tone: progTone, blur: progBlur, blurMed: progBlurMed, comp: progComp },
       uni: {
         tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), tempR: loc(progTone, "tempR"), tempB: loc(progTone, "tempB"), saturation: loc(progTone, "saturation"), position: gl.getAttribLocation(progTone, "position") },
         blur: { src: loc(progBlur, "src"), texel: loc(progBlur, "texel"), position: gl.getAttribLocation(progBlur, "position") },
-        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), sharpGate: loc(progComp, "sharpGate"), vibrance: loc(progComp, "vibrance"), position: gl.getAttribLocation(progComp, "position") },
+        blurMed: { src: loc(progBlurMed, "src"), texel: loc(progBlurMed, "texel"), position: gl.getAttribLocation(progBlurMed, "position") },
+        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), vibrance: loc(progComp, "vibrance"), position: gl.getAttribLocation(progComp, "position") },
       },
       quad, tex: {}, tgt: {}, w: 0, h: 0,
     };
@@ -328,7 +360,7 @@ function initFinishGL(width, height) {
     for (const k of Object.keys(F.tex)) gl.deleteTexture(F.tex[k]);
     for (const k of Object.keys(F.tgt)) gl.deleteFramebuffer(F.tgt[k].fbo);
     F.tex = { src: finishTexture(gl, width, height) };
-    F.tgt = { tone: finishTarget(gl, width, height), blurA: finishTarget(gl, width, height), blurB: finishTarget(gl, width, height) };
+    F.tgt = { tone: finishTarget(gl, width, height), blurA: finishTarget(gl, width, height), blurB: finishTarget(gl, width, height), blurMedA: finishTarget(gl, width, height), blurMedB: finishTarget(gl, width, height) };
     F.w = width; F.h = height;
   }
   return F;
@@ -384,15 +416,30 @@ async function finishPhotoWebGL(result) {
     gl.uniform1i(U.blur.src, 0);
     gl.uniform2f(U.blur.texel, 0, ty);
   });
+  finishDraw(F, "blurMed", F.tgt.blurMedA.fbo, () => {
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.tone.tex);
+    gl.uniform1i(U.blurMed.src, 0);
+    gl.uniform2f(U.blurMed.texel, tx, 0);
+  });
+  finishDraw(F, "blurMed", F.tgt.blurMedB.fbo, () => {
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.blurMedA.tex);
+    gl.uniform1i(U.blurMed.src, 0);
+    gl.uniform2f(U.blurMed.texel, 0, ty);
+  });
   finishDraw(F, "comp", null, () => {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.tone.tex);
     gl.uniform1i(U.comp.tone, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, F.tgt.blurB.tex);
     gl.uniform1i(U.comp.blurLuma, 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, F.tgt.blurMedB.tex);
+    gl.uniform1i(U.comp.blurMed, 2);
     gl.uniform2f(U.comp.texel, tx, ty);
     gl.uniform1f(U.comp.microAmt, params.microAmt);
     gl.uniform1f(U.comp.sharpAmt, params.sharpAmt);
-    gl.uniform1f(U.comp.sharpGate, params.sharpGate);
+    gl.uniform1f(U.comp.clarityAmt, params.clarityAmt);
+    gl.uniform1f(U.comp.haloGate, params.haloGate);
+    gl.uniform1f(U.comp.edgeRef, params.edgeRef);
+    gl.uniform1f(U.comp.sharpBase, params.sharpBase);
     gl.uniform1f(U.comp.vibrance, params.vibrance);
   });
   gl.activeTexture(gl.TEXTURE0);
@@ -404,6 +451,7 @@ async function finishPhotoWebGL(result) {
 async function cameraStart() {
   showError("");
   videoReady = false;
+  bracketEvsCache = undefined; // re-probe exposure bracketing for the new stream
   captureButton.disabled = true;
   setStatus("Starting camera…");
   if (!window.isSecureContext) { showError("Open the HTTPS GitHub Pages address to use the camera."); setStatus("HTTPS required"); return; }
@@ -497,7 +545,95 @@ async function captureHardwareStill() {
   }
 }
 
-function processBurst(frames, finish = "cpu") {
+/* Multi-still burst: 2-3 takePhoto() frames ~300ms apart, merged with the
+   existing registration. This gives the hardware-still path true temporal
+   denoise at full sensor resolution (previously: single frame, zero
+   temporal denoise). Per-shot refocus/re-exposure is acceptable for static
+   scenes; any per-shot failure just yields fewer frames, and zero frames
+   falls back to the video-buffer burst. */
+const STILL_BURST_COUNT = 3, STILL_BURST_GAP_MS = 300, STILL_SHOT_TIMEOUT_MS = 2500;
+
+/* Exposure bracketing: capture frames at different EVs and fuse the best-
+   exposed parts of each (Mertens-style). Probed once per camera start;
+   when unsupported we gracefully degrade to single-EV capture. */
+const BRACKET_EVS = [-1, 0, 1];
+const EV_SETTLE_MS = 300;
+let bracketEvsCache; // undefined = unprobed
+async function setExposureComp(ev) {
+  const track = stream?.getVideoTracks()[0];
+  try { await track.applyConstraints({ advanced: [{ exposureCompensation: ev }] }); return true; }
+  catch (error) { console.warn("exposureCompensation rejected:", error.message); return false; }
+}
+async function probeBracketSupport() {
+  if (bracketEvsCache !== undefined) return bracketEvsCache;
+  bracketEvsCache = null;
+  const track = stream?.getVideoTracks()[0];
+  if (track?.applyConstraints) {
+    const caps = track.getCapabilities?.() || {};
+    const ec = caps.exposureCompensation;
+    if (ec && isFinite(ec.min) && isFinite(ec.max)) {
+      const step = ec.step || 0.5;
+      const snap = (v) => Math.round(v / step) * step;
+      const evs = BRACKET_EVS.map(snap).filter((v) => v >= ec.min && v <= ec.max);
+      if (evs.length >= 2) { bracketEvsCache = evs; return evs; }
+    }
+    // Runtime probe: some devices accept the constraint without advertising it.
+    try {
+      await track.applyConstraints({ advanced: [{ exposureCompensation: -1 }] });
+      await delay(150);
+      const v = track.getSettings?.().exposureCompensation;
+      await track.applyConstraints({ advanced: [{ exposureCompensation: 0 }] });
+      if (typeof v === "number" && v < -0.5) bracketEvsCache = BRACKET_EVS;
+    } catch (error) { /* unsupported */ }
+  }
+  return bracketEvsCache;
+}
+async function captureBracketedStills(bracketEvs) {
+  // bracketEvs: e.g. [-1,0,1] or null (legacy: 3 same-EV stills for temporal denoise).
+  const evList = bracketEvs || [0, 0, 0];
+  const frames = [], evs = [];
+  try {
+    for (let i = 0; i < evList.length; i += 1) {
+      if (bracketEvs) { await setExposureComp(evList[i]); await delay(EV_SETTLE_MS); }
+      else if (i > 0) await delay(STILL_BURST_GAP_MS);
+      try {
+        const frame = await Promise.race([
+          captureHardwareStill(),
+          delay(STILL_SHOT_TIMEOUT_MS).then(() => { throw new Error("takePhoto timeout"); }),
+        ]);
+        if (frame) { frames.push(frame); evs.push(bracketEvs ? evList[i] : 0); }
+      } catch (error) { console.warn(`Hardware still ${i + 1} failed:`, error.message); break; }
+    }
+  } finally {
+    if (bracketEvs) await setExposureComp(0); // always leave the preview at neutral exposure
+  }
+  return { frames, evs };
+}
+async function captureBracketedVideo(count, bracketEvs) {
+  const frames = [], evs = [];
+  const evList = bracketEvs || [0];
+  const perEv = bracketEvs ? Math.max(1, Math.min(2, Math.round(count / evList.length))) : count;
+  try {
+    for (const ev of evList) {
+      if (bracketEvs) { await setExposureComp(ev); await delay(EV_SETTLE_MS); }
+      for (let i = 0; i < perEv; i += 1) {
+        frames.push(captureFrame());
+        evs.push(bracketEvs ? ev : 0);
+        if (i < perEv - 1) await delay(45);
+      }
+    }
+  } finally {
+    if (bracketEvs) await setExposureComp(0);
+  }
+  return { frames, evs };
+}
+async function captureHardwareStills() {
+  // Kept for compatibility; captureBurst now uses captureBracketedStills.
+  const { frames } = await captureBracketedStills(null);
+  return frames;
+}
+
+function processBurst(frames, evs, finish = "cpu") {
   return new Promise((resolve, reject) => {
     const id = ++requestId;
     const handler = (event) => { if (event.data.id !== id) return; worker.removeEventListener("message", handler); event.data.error ? reject(new Error(event.data.error)) : resolve(event.data); };
@@ -505,7 +641,7 @@ function processBurst(frames, finish = "cpu") {
     // WebGL path: structured-clone the frames (no transfer) so the main thread
     // retains them for the CPU fallback if GL finishing fails.
     const transfer = finish === "cpu" ? frames.map((frame) => frame.data.buffer) : [];
-    worker.postMessage({ id, frames, mode, style: photoStyle, finish }, transfer);
+    worker.postMessage({ id, frames, evs, mode, style: photoStyle, finish }, transfer);
   });
 }
 
@@ -516,17 +652,22 @@ function finishedImageToBlob(result) {
 }
 
 async function captureBurst(count, finish = "webgl") {
-  // Option A: native hardware still at full sensor resolution (single frame;
-  // takePhoto() refocuses/re-exposes per shot, so bursting it is infeasible).
-  const still = await captureHardwareStill();
-  // Option B: burst from the full native video buffer (videoWidth/videoHeight —
-  // never the CSS preview size), merged at WORKING_MAX_EDGE.
-  const frames = still ? [still] : [];
-  if (!still) for (let index = 0; index < count; index += 1) { frames.push(captureFrame()); if (index < count - 1) await delay(45); }
-  const result = await processBurst(frames, finish);
+  const bracketEvs = await probeBracketSupport();
+  // Option A: bracketed hardware stills at full sensor resolution — different
+  // exposures per shot, fused in the worker (temporal denoise + HDR fusion).
+  let frames = [], evs = [], hardwareStill = false;
+  if (window.ImageCapture) {
+    ({ frames, evs } = await captureBracketedStills(bracketEvs));
+    hardwareStill = frames.length > 0;
+  }
+  // Option B: bracketed burst from the full native video buffer
+  // (videoWidth/videoHeight — never the CSS preview size), merged at WORKING_MAX_EDGE.
+  if (!frames.length) ({ frames, evs } = await captureBracketedVideo(count, bracketEvs));
+  const result = await processBurst(frames, evs, finish);
   result.frameCount = frames.length;
-  result.hardwareStill = !!still;
-  if (finish === "webgl") result.frames = frames; // retained for CPU fallback
+  result.hardwareStill = hardwareStill;
+  result.bracketed = !!bracketEvs && new Set(evs).size > 1;
+  if (finish === "webgl") { result.frames = frames; result.evs = evs; } // retained for CPU fallback
   return result;
 }
 
@@ -544,7 +685,7 @@ async function takePhoto() {
       try { blob = await finishPhotoWebGL(result); }
       catch (error) {
         console.warn("WebGL finishing failed, falling back to CPU:", error);
-        blob = await finishedImageToBlob(await processBurst(result.frames, "cpu"));
+        blob = await finishedImageToBlob(await processBurst(result.frames, result.evs, "cpu"));
       }
     } else {
       blob = await finishedImageToBlob(result);
@@ -555,8 +696,8 @@ async function takePhoto() {
     galleryObjectUrl = URL.createObjectURL(blob);
     galleryThumb.src = galleryObjectUrl; galleryThumb.classList.remove("hidden"); galleryThumbButton.querySelector(".gallery-empty")?.classList.add("hidden");
     if (!result.hardwareStill) { if (result.elapsedMs > FRAME_BUDGET_MS) burstCount = Math.max(3, burstCount - 1); else if (burstCount < 6) burstCount += 1; }
-    setStatus(result.hardwareStill ? "Hardware still captured" : result.elapsedMs > FRAME_BUDGET_MS ? "Thermal guard active" : "Photo ready offline");
-    toast(`${result.width}×${result.height} · ${result.frameCount} frame${result.frameCount === 1 ? "" : "s"} · ${result.elapsedMs} ms`);
+    setStatus(result.hardwareStill ? `${result.frameCount} hardware stills merged` : result.elapsedMs > FRAME_BUDGET_MS ? "Thermal guard active" : "Photo ready offline");
+    toast(`${result.width}×${result.height} · ${result.frameCount} frame${result.frameCount === 1 ? "" : "s"}${result.bracketed ? " · HDR" : ""} · ${result.elapsedMs} ms`);
   } catch (error) { showError(`Photo processing failed: ${error.message}`); setStatus("Processing unavailable"); }
   finally { captureButton.disabled = false; showProc(false); }
 }
