@@ -37,6 +37,13 @@ let photoStyle = localStorage.getItem("lumen.photoStyle") === "pixel" ? "pixel" 
 const MAX_WIDTH = 1280;
 const MAX_HEIGHT = 720;
 const FRAME_BUDGET_MS = 33;
+// Full-resolution capture tiers (measured 2026-09-30, weak sandbox CPU, 3-frame burst):
+//   1920x1080: ~1.4s / ~55MB worker mem | 2560x1440: ~2.4s / ~98MB | 3840x2160: ~3.7s / ~221MB
+// 2560px long edge = 4x the pixels of 720p, safe memory on phones, ~1s on an A14-class SoC.
+const STREAM_IDEAL_WIDTH = 3840;
+const STREAM_IDEAL_HEIGHT = 2160;
+const WORKING_MAX_EDGE = 2560;
+const JPEG_QUALITY = 0.95;
 const worker = new Worker("./litert.worker.js", { type: "module" });
 
 let stream = null;
@@ -175,7 +182,7 @@ async function cameraStart() {
   if (!navigator.mediaDevices?.getUserMedia) { showError("This browser does not expose camera access."); setStatus("Camera unavailable"); return; }
   try {
     stream?.getTracks().forEach((track) => track.stop());
-    const constraints = { video: { facingMode: { ideal: facingMode }, width: { ideal: MAX_WIDTH, max: MAX_WIDTH }, height: { ideal: MAX_HEIGHT, max: MAX_HEIGHT }, frameRate: { ideal: 30, max: 60 } }, audio: false };
+    const constraints = { video: { facingMode: { ideal: facingMode }, width: { ideal: STREAM_IDEAL_WIDTH }, height: { ideal: STREAM_IDEAL_HEIGHT }, frameRate: { ideal: 30, max: 60 } }, audio: false };
     try { stream = await navigator.mediaDevices.getUserMedia(constraints); }
     catch (error) { if (error.name !== "OverconstrainedError") throw error; stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
     video.srcObject = stream;
@@ -226,7 +233,8 @@ function showFocus(event) {
 
 function captureFrame() {
   const sourceWidth = sensorWidth || video.videoWidth; const sourceHeight = sensorHeight || video.videoHeight;
-  const scale = Math.min(1, MAX_WIDTH / sourceWidth, MAX_HEIGHT / sourceHeight);
+  const longEdge = Math.max(sourceWidth, sourceHeight);
+  const scale = Math.min(1, WORKING_MAX_EDGE / longEdge);
   const width = Math.max(1, Math.round(sourceWidth * scale)); const height = Math.max(1, Math.round(sourceHeight * scale));
   captureCanvas.width = width; captureCanvas.height = height;
   const context = captureCanvas.getContext("2d", { willReadFrequently: true });
@@ -234,6 +242,31 @@ function captureFrame() {
   if (facingMode === "user") { context.translate(width, 0); context.scale(-1, 1); }
   context.drawImage(video, 0, 0, width, height); context.restore();
   return context.getImageData(0, 0, width, height);
+}
+
+/* Full-resolution hardware still (Chromium: ChromeOS / Android / desktop Chrome).
+   ImageCapture.takePhoto() fires the physical sensor at its maximum still-image
+   resolution (e.g. 12MP), bypassing the video pipeline entirely. Not implemented
+   in Safari/Firefox — window.ImageCapture is undefined there, so this cleanly
+   returns null and the caller falls back to the native video buffer. */
+async function captureHardwareStill() {
+  if (!window.ImageCapture) return null;
+  try {
+    const track = stream.getVideoTracks()[0];
+    const imageCapture = new ImageCapture(track);
+    const photoBlob = await imageCapture.takePhoto();
+    const bitmap = await createImageBitmap(photoBlob);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width; canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (facingMode === "user") { ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  } catch (error) {
+    console.warn("ImageCapture.takePhoto() unavailable, falling back to video buffer:", error);
+    return null;
+  }
 }
 
 function processBurst(frames) {
@@ -246,30 +279,38 @@ function processBurst(frames) {
 }
 
 async function captureBurst(count) {
-  const frames = [];
-  for (let index = 0; index < count; index += 1) { frames.push(captureFrame()); if (index < count - 1) await delay(45); }
-  return processBurst(frames);
+  // Option A: native hardware still at full sensor resolution (single frame;
+  // takePhoto() refocuses/re-exposes per shot, so bursting it is infeasible).
+  const still = await captureHardwareStill();
+  // Option B: burst from the full native video buffer (videoWidth/videoHeight —
+  // never the CSS preview size), merged at WORKING_MAX_EDGE.
+  const frames = still ? [still] : [];
+  if (!still) for (let index = 0; index < count; index += 1) { frames.push(captureFrame()); if (index < count - 1) await delay(45); }
+  const result = await processBurst(frames);
+  result.frameCount = frames.length;
+  result.hardwareStill = !!still;
+  return result;
 }
 
 async function takePhoto() {
   if (!stream || !videoReady) return;
   if (timerSeconds) { for (let n = timerSeconds; n > 0; n -= 1) { countdown.textContent = n; countdown.hidden = false; await delay(1000); } countdown.hidden = true; }
   const count = mode === "night" ? Math.min(6, burstCount + 2) : mode === "portrait" ? Math.min(5, burstCount + 1) : burstCount;
-  setStatus(`Capturing ${count}-frame ${mode} burst…`);
+  setStatus(`Capturing ${mode} photo…`);
   setStage("Capturing…"); showProc(true); fireFlash();
   captureButton.disabled = true;
   try {
     const result = await captureBurst(count);
     captureCanvas.width = result.width; captureCanvas.height = result.height;
     captureCanvas.getContext("2d").putImageData(new ImageData(result.data, result.width, result.height), 0, 0);
-    const blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", 0.94));
+    const blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
     originalImage = await createImageBitmap(blob); processedBlob = blob;
     if (galleryObjectUrl) URL.revokeObjectURL(galleryObjectUrl);
     galleryObjectUrl = URL.createObjectURL(blob);
     galleryThumb.src = galleryObjectUrl; galleryThumb.classList.remove("hidden"); galleryThumbButton.querySelector(".gallery-empty")?.classList.add("hidden");
-    if (result.elapsedMs > FRAME_BUDGET_MS) burstCount = Math.max(3, burstCount - 1); else if (burstCount < 6) burstCount += 1;
-    setStatus(result.elapsedMs > FRAME_BUDGET_MS ? "Thermal guard active" : "Photo ready offline");
-    toast(`Processed locally in ${result.elapsedMs} ms`);
+    if (!result.hardwareStill) { if (result.elapsedMs > FRAME_BUDGET_MS) burstCount = Math.max(3, burstCount - 1); else if (burstCount < 6) burstCount += 1; }
+    setStatus(result.hardwareStill ? "Hardware still captured" : result.elapsedMs > FRAME_BUDGET_MS ? "Thermal guard active" : "Photo ready offline");
+    toast(`${result.width}×${result.height} · ${result.frameCount} frame${result.frameCount === 1 ? "" : "s"} · ${result.elapsedMs} ms`);
   } catch (error) { showError(`Photo processing failed: ${error.message}`); setStatus("Processing unavailable"); }
   finally { captureButton.disabled = false; showProc(false); }
 }
