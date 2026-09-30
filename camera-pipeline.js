@@ -50,6 +50,8 @@ let gl = null;
 let glProgram = null;
 let glTexture = null;
 let galleryObjectUrl = null;
+let sensorWidth = 0;
+let sensorHeight = 0;
 
 const setStatus = (text) => { statusPill.textContent = text; };
 const setStage = (text) => { procStage.textContent = text; };
@@ -129,11 +131,27 @@ function initLiveShader() {
   fxCanvas.classList.remove("hidden");
 }
 
+/* Dynamic hardware aspect-ratio lock: the single source of truth for the
+   sensor geometry is MediaStreamTrack.getSettings(). Every canvas backing
+   store is derived from it with a UNIFORM scale, so nothing can stretch. */
+function lockSensorAspect() {
+  const track = stream?.getVideoTracks()[0];
+  const settings = track?.getSettings?.() || {};
+  sensorWidth = settings.width || video.videoWidth || 0;
+  sensorHeight = settings.height || video.videoHeight || 0;
+  if (sensorWidth > 0 && sensorHeight > 0) {
+    document.documentElement.style.setProperty("--sensor-ratio", `${sensorWidth} / ${sensorHeight}`);
+  }
+  return sensorWidth > 0 && sensorHeight > 0;
+}
+
 function renderLiveFrame() {
   if (!gl || !videoReady || video.readyState < 2) { liveFrame = requestAnimationFrame(renderLiveFrame); return; }
-  const width = Math.min(video.videoWidth, MAX_WIDTH);
-  const height = Math.min(video.videoHeight, MAX_HEIGHT);
-  fxCanvas.width = width; fxCanvas.height = height;
+  const srcW = sensorWidth || video.videoWidth, srcH = sensorHeight || video.videoHeight;
+  const scale = Math.min(1, MAX_WIDTH / srcW, MAX_HEIGHT / srcH);
+  const width = Math.max(2, Math.round(srcW * scale));
+  const height = Math.max(2, Math.round(srcH * scale));
+  if (fxCanvas.width !== width || fxCanvas.height !== height) { fxCanvas.width = width; fxCanvas.height = height; }
   gl.viewport(0, 0, width, height);
   gl.useProgram(glProgram);
   gl.bindTexture(gl.TEXTURE_2D, glTexture);
@@ -160,6 +178,7 @@ async function cameraStart() {
     video.srcObject = stream;
     await video.play(); await waitFrame();
     if (!video.videoWidth) throw new Error("No video frame was received");
+    lockSensorAspect();
     videoReady = true;
     placeholder.classList.add("hidden"); captureButton.disabled = false;
     setStatus(facingMode === "environment" ? "Rear camera ready" : "Front camera ready");
@@ -203,7 +222,7 @@ function showFocus(event) {
 }
 
 function captureFrame() {
-  const sourceWidth = video.videoWidth; const sourceHeight = video.videoHeight;
+  const sourceWidth = sensorWidth || video.videoWidth; const sourceHeight = sensorHeight || video.videoHeight;
   const scale = Math.min(1, MAX_WIDTH / sourceWidth, MAX_HEIGHT / sourceHeight);
   const width = Math.max(1, Math.round(sourceWidth * scale)); const height = Math.max(1, Math.round(sourceHeight * scale));
   captureCanvas.width = width; captureCanvas.height = height;
@@ -291,5 +310,6 @@ galleryThumbButton.onclick = openViewer;
 viewerClose.onclick = closeViewer;
 viewerSave.onclick = savePhoto;
 viewerShare.onclick = sharePhoto;
+video.addEventListener("resize", () => { if (videoReady && stream) lockSensorAspect(); });
 window.addEventListener("beforeunload", stopCamera);
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));

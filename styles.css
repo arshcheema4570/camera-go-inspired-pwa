@@ -6,6 +6,11 @@
   --glass:rgba(0,0,0,.45);
   --accent:#ffd54a;
   --shutter:76px;
+  /* Dynamic hardware aspect-ratio lock: camera-pipeline.js sets this from
+     MediaStreamTrack.getSettings() on stream init (and re-locks on video
+     resize). Backing stores are sized from the same values with a uniform
+     scale, so the sensor can never be stretched. */
+  --sensor-ratio:4 / 3;
   font-family:Roboto,system-ui,-apple-system,"Segoe UI",sans-serif;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -13,7 +18,10 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hid
 body{height:100svh;user-select:none;-webkit-user-select:none;touch-action:manipulation}
 .hidden{display:none !important}
 
-/* ---------- fullscreen viewfinder ---------- */
+/* ---------- fullscreen viewfinder ----------
+   object-fit:cover + a backing store locked to the true sensor aspect
+   (see --sensor-ratio) guarantees zero stretch: the feed is cropped,
+   never squished. */
 .viewfinder,.fx-canvas{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
 .viewfinder.mirrored,.fx-canvas.mirrored{transform:scaleX(-1)}
 #captureCanvas{position:fixed;inset:0;pointer-events:none}
