@@ -1,4 +1,4 @@
-const CACHE_NAME = "lumen-camera-v22";
+const CACHE_NAME = "lumen-camera-v23";
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./camera-pipeline.js", "./litert.worker.js", "./manifest.json", "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png", "./vendor/pico/pico.js", "./vendor/pico/facefinder"];
 
 self.addEventListener("install", (event) => event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting())));

@@ -573,18 +573,18 @@ async function captureHardwareStill() {
   }
 }
 
-/* Multi-still burst: 2-3 takePhoto() frames ~300ms apart, merged with the
+/* Multi-still burst: 5 takePhoto() frames ~300ms apart, merged with the
    existing registration. This gives the hardware-still path true temporal
    denoise at full sensor resolution (previously: single frame, zero
    temporal denoise). Per-shot refocus/re-exposure is acceptable for static
    scenes; any per-shot failure just yields fewer frames, and zero frames
    falls back to the video-buffer burst. */
-const STILL_BURST_COUNT = 3, STILL_BURST_GAP_MS = 300, STILL_SHOT_TIMEOUT_MS = 2500;
+const STILL_BURST_COUNT = 5, STILL_BURST_GAP_MS = 300, STILL_SHOT_TIMEOUT_MS = 2500;
 
 /* Exposure bracketing: capture frames at different EVs and fuse the best-
    exposed parts of each (Mertens-style). Probed once per camera start;
    when unsupported we gracefully degrade to single-EV capture. */
-const BRACKET_EVS = [-1, 0, 1];
+const BRACKET_EVS = [-2, -1, 0, 1, 2];
 const EV_SETTLE_MS = 300;
 let bracketEvsCache; // undefined = unprobed
 async function setExposureComp(ev) {
@@ -617,8 +617,18 @@ async function probeBracketSupport() {
   return bracketEvsCache;
 }
 async function captureBracketedStills(bracketEvs) {
-  // bracketEvs: e.g. [-1,0,1] or null (legacy: 3 same-EV stills for temporal denoise).
-  const evList = bracketEvs || [0, 0, 0];
+  // bracketEvs: e.g. [-2,-1,0,1,2] (snapped to device range) or null (legacy:
+  // same-EV stills for temporal denoise). Always takes STILL_BURST_COUNT (5)
+  // photos; when the device bracket range yields fewer EVs, pad with extra
+  // base-exposure frames so EV~0 gets true temporal denoising.
+  let evList;
+  if (bracketEvs) {
+    evList = [...bracketEvs];
+    const baseEv = bracketEvs.reduce((a, b) => (Math.abs(b) < Math.abs(a) ? b : a));
+    while (evList.length < STILL_BURST_COUNT) evList.splice(Math.ceil(evList.length / 2), 0, baseEv);
+  } else {
+    evList = new Array(STILL_BURST_COUNT).fill(0);
+  }
   const frames = [], evs = [];
   try {
     for (let i = 0; i < evList.length; i += 1) {
