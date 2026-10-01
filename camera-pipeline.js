@@ -29,10 +29,9 @@ const viewerImage = $("viewerImage");
 const viewerClose = $("viewerClose");
 const viewerSave = $("viewerSave");
 const viewerShare = $("viewerShare");
-const styleButton = $("styleButton");
-const styleVal = $("styleVal");
 let viewerObjectUrl = null;
-let photoStyle = localStorage.getItem("lumen.photoStyle") === "pixel" ? "pixel" : "iphone";
+// Single Pixel-inspired look (the iPhone style was removed at the user's
+// request — he wants Pixel-style photos from the PWA).
 
 const MAX_WIDTH = 1280;
 const MAX_HEIGHT = 720;
@@ -207,6 +206,7 @@ const FINISH_VERT = "attribute vec2 position; varying vec2 uv; void main(){ uv=(
 const FINISH_HEAD = "#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n#define TONE_SCALE 1.5\nvarying vec2 uv;\n";
 const FINISH_TONE_FRAG = FINISH_HEAD + [
   "uniform sampler2D src;",
+  "uniform sampler2D skinMask;",
   "uniform vec3 gains;",
   "uniform float exposure;",
   "uniform float knee;",
@@ -218,6 +218,7 @@ const FINISH_TONE_FRAG = FINISH_HEAD + [
   "uniform float tempR;",
   "uniform float tempB;",
   "uniform float saturation;",
+  "uniform float skinWarmAmt;",
   "vec3 sstepv(float e0, float e1, vec3 x){ vec3 t = clamp((x-e0)/(e1-e0), 0.0, 1.0); return t*t*(3.0-2.0*t); }",
   "void main(){",
   "  vec3 c = texture2D(src, uv).rgb * gains * exposure;",
@@ -225,6 +226,8 @@ const FINISH_TONE_FRAG = FINISH_HEAD + [
   "  c = (c - 0.5) * contrast + 0.5;",
   "  c += (vec3(shadowTarget) - c) * shadowAmt * sstepv(shadowEdge, 0.0, c);",
   "  c.r *= tempR; c.b *= tempB;",
+  "  float skin = texture2D(skinMask, uv).r;",
+  "  c.r *= (1.0 + skin * skinWarmAmt); c.b *= (1.0 - skin * skinWarmAmt);",
   "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));",
   "  c = l + (c - l) * saturation;",
   "  gl_FragColor = vec4(clamp(c, 0.0, 1.5) / TONE_SCALE, texture2D(src, uv).a);",
@@ -258,6 +261,7 @@ const FINISH_COMP_FRAG = FINISH_HEAD + [
   "uniform sampler2D tone;",
   "uniform sampler2D blurLuma;",
   "uniform sampler2D blurMed;",
+  "uniform sampler2D skinMask;",
   "uniform vec2 texel;",
   "uniform float microAmt;",
   "uniform float sharpAmt;",
@@ -265,6 +269,9 @@ const FINISH_COMP_FRAG = FINISH_HEAD + [
   "uniform float haloGate;",
   "uniform float edgeRef;",
   "uniform float sharpBase;",
+  "uniform float skinProtSharp;",
+  "uniform float skinProtMicro;",
+  "uniform float skinProtClar;",
   "uniform float vibrance;",
   "float tl(vec2 p){ return dot(texture2D(tone, p).rgb * TONE_SCALE, vec3(0.2126, 0.7152, 0.0722)); }",
   "void main(){",
@@ -274,14 +281,15 @@ const FINISH_COMP_FRAG = FINISH_HEAD + [
   "  float l = dot(tc, vec3(0.2126, 0.7152, 0.0722));",
   "  float b = texture2D(blurLuma, uv).r;",
   "  float bm = texture2D(blurMed, uv).r;",
+  "  float skin = texture2D(skinMask, uv).r;",
   "  float gx = tl(uv + vec2(texel.x, 0.0)) - tl(uv - vec2(texel.x, 0.0));",
   "  float gy = tl(uv + vec2(0.0, texel.y)) - tl(uv - vec2(0.0, texel.y));",
   "  float edgeW = clamp(sqrt(gx * gx + gy * gy) / edgeRef, 0.0, 1.0);",
-  "  float micro = (l - b) * microAmt * max(0.2, min(1.0, edgeW * 2.0));",
-  "  float clar = clamp((l - bm) * clarityAmt, -haloGate, haloGate);",
+  "  float micro = (l - b) * microAmt * max(0.2, min(1.0, edgeW * 2.0)) * (1.0 - skin * skinProtMicro);",
+  "  float clar = clamp((l - bm) * clarityAmt, -haloGate, haloGate) * (1.0 - skin * skinProtClar);",
   "  float ln = (tl(uv + vec2(texel.x, 0.0)) + tl(uv - vec2(texel.x, 0.0))",
   "            + tl(uv + vec2(0.0, texel.y)) + tl(uv - vec2(0.0, texel.y))) * 0.25;",
-  "  float sharp = (l - ln) * sharpAmt * (sharpBase + (1.0 - sharpBase) * edgeW);",
+  "  float sharp = (l - ln) * sharpAmt * (sharpBase + (1.0 - sharpBase) * edgeW) * (1.0 - skin * skinProtSharp);",
   "  float gate = t4.a * 0.1;",
   "  if (abs(sharp) < gate) sharp = 0.0;",
   "  float delta = micro + sharp + clar;",
@@ -345,10 +353,10 @@ function initFinishGL(width, height) {
       gl, canvas, maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
       prog: { tone: progTone, blur: progBlur, blurMed: progBlurMed, comp: progComp },
       uni: {
-        tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), tempR: loc(progTone, "tempR"), tempB: loc(progTone, "tempB"), saturation: loc(progTone, "saturation"), position: gl.getAttribLocation(progTone, "position") },
+        tone: { src: loc(progTone, "src"), skinMask: loc(progTone, "skinMask"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), tempR: loc(progTone, "tempR"), tempB: loc(progTone, "tempB"), saturation: loc(progTone, "saturation"), skinWarmAmt: loc(progTone, "skinWarmAmt"), position: gl.getAttribLocation(progTone, "position") },
         blur: { src: loc(progBlur, "src"), texel: loc(progBlur, "texel"), position: gl.getAttribLocation(progBlur, "position") },
         blurMed: { src: loc(progBlurMed, "src"), texel: loc(progBlurMed, "texel"), position: gl.getAttribLocation(progBlurMed, "position") },
-        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), vibrance: loc(progComp, "vibrance"), position: gl.getAttribLocation(progComp, "position") },
+        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), skinMask: loc(progComp, "skinMask"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), skinProtSharp: loc(progComp, "skinProtSharp"), skinProtMicro: loc(progComp, "skinProtMicro"), skinProtClar: loc(progComp, "skinProtClar"), vibrance: loc(progComp, "vibrance"), position: gl.getAttribLocation(progComp, "position") },
       },
       quad, tex: {}, tgt: {}, w: 0, h: 0,
     };
@@ -391,9 +399,30 @@ async function finishPhotoWebGL(result) {
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   const tx = 1 / width, ty = 1 / height;
+  // Skin mask texture (1/4 res, RGBA, LINEAR for free feathering). Uploaded
+  // with FLIP_Y like the source so uv coordinates line up with the frame.
+  const sm = params.skinMask && params.skinMask.data ? params.skinMask : { data: new Uint8Array([0]), width: 1, height: 1 };
+  if (!F.tex.skin || F.skinW !== sm.width || F.skinH !== sm.height) {
+    if (F.tex.skin) gl.deleteTexture(F.tex.skin);
+    const st = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, st);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    F.tex.skin = st; F.skinW = sm.width; F.skinH = sm.height;
+  }
+  const smRgba = new Uint8Array(sm.width * sm.height * 4);
+  for (let si = 0; si < sm.data.length; si += 1) { smRgba[si * 4] = sm.data[si]; smRgba[si * 4 + 3] = 255; }
+  gl.bindTexture(gl.TEXTURE_2D, F.tex.skin);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, sm.width, sm.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, smRgba);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   finishDraw(F, "tone", F.tgt.tone.fbo, () => {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tex.src);
     gl.uniform1i(U.tone.src, 0);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, F.tex.skin);
+    gl.uniform1i(U.tone.skinMask, 3);
     gl.uniform3f(U.tone.gains, params.gains[0], params.gains[1], params.gains[2]);
     gl.uniform1f(U.tone.exposure, params.exposure);
     gl.uniform1f(U.tone.knee, params.knee);
@@ -405,6 +434,7 @@ async function finishPhotoWebGL(result) {
     gl.uniform1f(U.tone.tempR, params.tempR);
     gl.uniform1f(U.tone.tempB, params.tempB);
     gl.uniform1f(U.tone.saturation, params.saturation);
+    gl.uniform1f(U.tone.skinWarmAmt, params.skinWarmAmt || 0);
   });
   finishDraw(F, "blur", F.tgt.blurA.fbo, () => {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.tone.tex);
@@ -433,6 +463,8 @@ async function finishPhotoWebGL(result) {
     gl.uniform1i(U.comp.blurLuma, 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, F.tgt.blurMedB.tex);
     gl.uniform1i(U.comp.blurMed, 2);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, F.tex.skin);
+    gl.uniform1i(U.comp.skinMask, 3);
     gl.uniform2f(U.comp.texel, tx, ty);
     gl.uniform1f(U.comp.microAmt, params.microAmt);
     gl.uniform1f(U.comp.sharpAmt, params.sharpAmt);
@@ -440,6 +472,9 @@ async function finishPhotoWebGL(result) {
     gl.uniform1f(U.comp.haloGate, params.haloGate);
     gl.uniform1f(U.comp.edgeRef, params.edgeRef);
     gl.uniform1f(U.comp.sharpBase, params.sharpBase);
+    gl.uniform1f(U.comp.skinProtSharp, params.skinProtSharp || 0);
+    gl.uniform1f(U.comp.skinProtMicro, params.skinProtMicro || 0);
+    gl.uniform1f(U.comp.skinProtClar, params.skinProtClar || 0);
     gl.uniform1f(U.comp.vibrance, params.vibrance);
   });
   gl.activeTexture(gl.TEXTURE0);
@@ -641,7 +676,7 @@ function processBurst(frames, evs, finish = "cpu") {
     // WebGL path: structured-clone the frames (no transfer) so the main thread
     // retains them for the CPU fallback if GL finishing fails.
     const transfer = finish === "cpu" ? frames.map((frame) => frame.data.buffer) : [];
-    worker.postMessage({ id, frames, evs, mode, style: photoStyle, finish }, transfer);
+    worker.postMessage({ id, frames, evs, mode, style: "pixel", finish }, transfer);
   });
 }
 
@@ -735,8 +770,6 @@ zoomRange.oninput = setZoom;
 video.onclick = showFocus;
 gridButton.onclick = () => { const on = !gridOverlay.classList.toggle("hidden"); gridButton.setAttribute("aria-pressed", String(on)); gridButton.classList.toggle("off", !on); };
 timerButton.onclick = () => { timerSeconds = timerSeconds === 0 ? 3 : timerSeconds === 3 ? 10 : 0; timerLabel.textContent = timerSeconds ? `${timerSeconds}s` : "Off"; timerButton.setAttribute("aria-pressed", String(Boolean(timerSeconds))); timerButton.classList.toggle("off", !timerSeconds); };
-styleVal.textContent = photoStyle === "pixel" ? "Pixel" : "iPhone";
-styleButton.onclick = () => { photoStyle = photoStyle === "pixel" ? "iphone" : "pixel"; localStorage.setItem("lumen.photoStyle", photoStyle); styleVal.textContent = photoStyle === "pixel" ? "Pixel" : "iPhone"; setStatus(`${styleVal.textContent} look`); };
 document.querySelectorAll(".mode").forEach((button) => button.onclick = () => { document.querySelectorAll(".mode").forEach((item) => { item.classList.remove("active"); item.setAttribute("aria-selected", "false"); }); button.classList.add("active"); button.setAttribute("aria-selected", "true"); mode = button.dataset.mode; setStatus(`${button.textContent} mode`); });
 document.querySelectorAll(".zoom-shortcut").forEach((button) => button.onclick = () => { zoomRange.value = button.dataset.zoom; zoomRange.dispatchEvent(new Event("input")); document.querySelectorAll(".zoom-shortcut").forEach((item) => item.classList.toggle("active", item === button)); });
 galleryThumbButton.onclick = openViewer;
