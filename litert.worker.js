@@ -59,7 +59,8 @@ function resize(image, targetWidth = 0, targetHeight = 0) {
      partially failed — the multi-frame paths already have temporal
      denoise), a small 3x3 edge-preserving bilateral on luma. Alpha
      (the noise-adaptive sharpen gate) is preserved throughout. */
-function denoiseMerged(data, width, height, single) {
+function denoiseMerged(data, width, height, frameCount) {
+  const single = frameCount === 1;
   const n = width * height;
   const Y = new Float32Array(n), Co = new Float32Array(n), Cg = new Float32Array(n);
   for (let p = 0; p < n; p += 1) {
@@ -85,8 +86,12 @@ function denoiseMerged(data, width, height, single) {
     }
     Y.set(out);
   }
-  const CoB = blurLumaSeparable(Co, width, height, 8);
-  const CgB = blurLumaSeparable(Cg, width, height, 8);
+  // Chroma denoise scaled by temporal averaging: N merged frames already cut
+  // chroma noise by ~sqrt(N), so heavy blurring beyond that only erases fine
+  // color detail (fabric weave, foliage). Single frames keep the full clean-up.
+  const chromaR = single ? 8 : (frameCount >= 6 ? 0 : 2);
+  const CoB = chromaR > 0 ? blurLumaSeparable(Co, width, height, chromaR) : Co;
+  const CgB = chromaR > 0 ? blurLumaSeparable(Cg, width, height, chromaR) : Cg;
   for (let p = 0; p < n; p += 1) {
     const i4 = p * 4, y = Y[p], co = CoB[p], cg = CgB[p];
     data[i4] = (y + co - cg) * 255;
@@ -136,13 +141,11 @@ function sadShift(ref, tgt, w, h, dx, dy) {
   return sad;
 }
 
-function estimateShiftCoarse(refLuma, tgtLuma, width, height) {
+function estimateShiftCoarse(refSmall, tgtSmall, width, height) {
   const dw = 160, dh = 90;
-  const ref = downsampleLuma(refLuma, width, height, dw, dh);
-  const tgt = downsampleLuma(tgtLuma, width, height, dw, dh);
   let bestDx = 0, bestDy = 0, bestSad = Infinity;
   for (let dy = -8; dy <= 8; dy += 1) for (let dx = -8; dx <= 8; dx += 1) {
-    const sad = sadShift(ref, tgt, dw, dh, dx, dy);
+    const sad = sadShift(refSmall, tgtSmall, dw, dh, dx, dy);
     if (sad < bestSad) { bestSad = sad; bestDx = dx; bestDy = dy; }
   }
   return [bestDx * (width / dw), bestDy * (height / dh)];
@@ -189,25 +192,64 @@ function estimateShiftFine(refLuma, tgtLuma, width, height, estX, estY) {
    parts of each: weight = wellExposedness * (contrast + e) * (saturation + e),
    normalized per pixel. When all EVs are equal this degrades gracefully to
    plain temporal averaging. */
+/* Merge with exposure bracketing + noise-adaptive soft weighting.
+
+   Frames carry per-frame EVs (0 when bracketing is unsupported). The
+   registration reference is the SHARPEST frame (brightness-normalized
+   gradient energy on 160x90 luma) — handheld bursts vary in motion blur,
+   and anchoring to the sharpest frame keeps the merge crisp.
+
+   Frames are grouped by EV. Within each EV group, frames are combined with
+   soft robust (Cauchy) weights w = 1/(1+(d/d0)^2) against the group's own
+   anchor frame (its sharpest): sensor noise (small d) averages fully,
+   ghosts (large d) fade to ~0 without a hard cutoff. All sampling is done
+   in the global (reference-frame) coordinate system — frame k contributes
+   its pixel at (x + sh[k]), compared against the anchor at (x + gsh) — so
+   the anchor always scores d = 0, w = 1. The per-pixel temporal std of luma
+   feeds a noise-adaptive sharpen gate, packed into the alpha channel
+   (byte = clamp(gate/0.1)*255) for the finishing stage.
+
+   Across EV groups, Mertens-style exposure fusion merges the best-exposed
+   parts of each: weight = wellExposedness * (contrast + e), normalized per
+   pixel. Deliberately NO saturation term — favoring the more-saturated
+   exposure would pump chroma (v21 true-color philosophy). When all EVs are
+   equal this degrades gracefully to plain temporal averaging. */
 function merge(frames, evs, mode) {
   const { width, height } = frames[0];
   const n = width * height;
   const evKeys = frames.map((f, i) => Math.round(((evs && evs[i]) || 0) * 10));
   const uniqEvs = [...new Set(evKeys)].sort((a, b) => a - b);
-  let refKey = uniqEvs[0];
-  for (const k of uniqEvs) if (Math.abs(k) < Math.abs(refKey)) refKey = k;
-  const refIdx = evKeys.indexOf(refKey);
+
+  // Full + downsampled luma, computed once and reused by sharpness scoring
+  // and both registration stages.
+  const DW = 160, DH = 90;
+  const fullLumas = [], smallLumas = [], sharpness = [];
+  for (let k = 0; k < frames.length; k += 1) {
+    const full = lumaFull(frames[k].data, width, height);
+    fullLumas.push(full);
+    const sm = downsampleLuma(full, width, height, DW, DH);
+    smallLumas.push(sm);
+    let e = 0, m = 0;
+    for (let y = 0; y < DH; y += 1) {
+      const row = y * DW;
+      // Squared gradients: a steep step scores far higher than a gentle ramp
+      // with the same total rise (plain |dx| would telescope and tie them).
+      for (let x = 1; x < DW; x += 1) { const dx = sm[row + x] - sm[row + x - 1]; e += dx * dx; }
+      for (let x = 0; x < DW; x += 1) m += sm[row + x];
+    }
+    sharpness.push(e / (m / (DW * DH) + 1)); // brightness-normalized
+  }
+  let refIdx = 0;
+  for (let k = 1; k < frames.length; k += 1) if (sharpness[k] > sharpness[refIdx]) refIdx = k;
 
   // Register every frame to the reference frame; reference needs no shift.
   const shifts = new Array(frames.length).fill(null);
   shifts[refIdx] = [0, 0];
   if (frames.length > 1) {
-    const refLuma = lumaFull(frames[refIdx].data, width, height);
     for (let k = 0; k < frames.length; k += 1) {
       if (k === refIdx) continue;
-      const tgtLuma = lumaFull(frames[k].data, width, height);
-      const [cx, cy] = estimateShiftCoarse(refLuma, tgtLuma, width, height);
-      shifts[k] = estimateShiftFine(refLuma, tgtLuma, width, height, cx, cy);
+      const [cx, cy] = estimateShiftCoarse(smallLumas[refIdx], smallLumas[k], width, height);
+      shifts[k] = estimateShiftFine(fullLumas[refIdx], fullLumas[k], width, height, cx, cy);
     }
   }
 
@@ -219,31 +261,44 @@ function merge(frames, evs, mode) {
 
   for (const key of uniqEvs) {
     const idxs = evKeys.map((k, i) => (k === key ? i : -1)).filter((i) => i >= 0);
-    const gRef = frames[idxs[0]].data; // group's own reference (same EV)
+    // Group anchor: sharpest frame of this EV (its ghost-rejection weight is 1).
+    let gRefIdx = idxs[0];
+    for (const k of idxs) if (sharpness[k] > sharpness[gRefIdx]) gRefIdx = k;
+    const gRef = frames[gRefIdx].data;
+    const gsh = shifts[gRefIdx];
     const acc = new Float32Array(n * 3);
-    // Pass 1: soft-weighted temporal mean vs the group's reference frame.
+    // Pass 1: soft-weighted temporal mean vs the group's anchor frame.
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
-        const p = y * width + x, i3 = p * 3, i4 = p * 4;
+        const p = y * width + x, i3 = p * 3;
+        // Anchor pixel in global coordinates (clamped at the borders).
+        const gx = Math.min(width - 1, Math.max(0, x + gsh[0]));
+        const gy = Math.min(height - 1, Math.max(0, y + gsh[1]));
+        const gi = (gy * width + gx) * 4;
+        const gr = gRef[gi], gg = gRef[gi + 1], gb = gRef[gi + 2];
         let sr = 0, sg = 0, sb = 0, sw = 0;
         for (const k of idxs) {
           const sh = shifts[k];
           const tx = x + sh[0], ty = y + sh[1];
           if (tx < 0 || tx >= width || ty < 0 || ty >= height) continue;
           const t = (ty * width + tx) * 4, f = frames[k].data;
-          const d = Math.abs(f[t] - gRef[i4]) + Math.abs(f[t + 1] - gRef[i4 + 1]) + Math.abs(f[t + 2] - gRef[i4 + 2]);
+          const d = Math.abs(f[t] - gr) + Math.abs(f[t + 1] - gg) + Math.abs(f[t + 2] - gb);
           const w = 1 / (1 + (d * d) / d02);
           sr += f[t] * w; sg += f[t + 1] * w; sb += f[t + 2] * w; sw += w;
         }
         if (sw > 0) { acc[i3] = sr / sw; acc[i3 + 1] = sg / sw; acc[i3 + 2] = sb / sw; }
-        else { acc[i3] = gRef[i4]; acc[i3 + 1] = gRef[i4 + 1]; acc[i3 + 2] = gRef[i4 + 2]; }
+        else { acc[i3] = gr; acc[i3 + 1] = gg; acc[i3 + 2] = gb; }
       }
     }
     // Pass 2: temporal std of luma -> per-pixel noise-adaptive sharpen gate.
     const gate = new Uint8Array(n);
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
-        const p = y * width + x, i3 = p * 3, i4 = p * 4;
+        const p = y * width + x, i3 = p * 3;
+        const gx = Math.min(width - 1, Math.max(0, x + gsh[0]));
+        const gy = Math.min(height - 1, Math.max(0, y + gsh[1]));
+        const gi = (gy * width + gx) * 4;
+        const gr = gRef[gi], gg = gRef[gi + 1], gb = gRef[gi + 2];
         const lm = acc[i3] * 0.299 + acc[i3 + 1] * 0.587 + acc[i3 + 2] * 0.114;
         let v = 0, sw = 0;
         for (const k of idxs) {
@@ -251,7 +306,7 @@ function merge(frames, evs, mode) {
           const tx = x + sh[0], ty = y + sh[1];
           if (tx < 0 || tx >= width || ty < 0 || ty >= height) continue;
           const t = (ty * width + tx) * 4, f = frames[k].data;
-          const d = Math.abs(f[t] - gRef[i4]) + Math.abs(f[t + 1] - gRef[i4 + 1]) + Math.abs(f[t + 2] - gRef[i4 + 2]);
+          const d = Math.abs(f[t] - gr) + Math.abs(f[t + 1] - gg) + Math.abs(f[t + 2] - gb);
           const w = 1 / (1 + (d * d) / d02);
           const l = f[t] * 0.299 + f[t + 1] * 0.587 + f[t + 2] * 0.114;
           v += w * (l - lm) * (l - lm); sw += w;
@@ -272,6 +327,8 @@ function merge(frames, evs, mode) {
   if (groups.length === 1) return { width, height, data: groups[0].data };
 
   // Exposure fusion across EV groups: keep the best-exposed parts of each.
+  // Weight = well-exposedness * local contrast. No saturation term: favoring
+  // the more-saturated exposure would pump chroma (true color).
   const gLumas = groups.map((gr) => {
     const l = new Float32Array(n);
     for (let p = 0; p < n; p += 1) {
@@ -287,13 +344,11 @@ function merge(frames, evs, mode) {
     const ws = new Array(groups.length);
     let wsum = 0;
     for (let gi = 0; gi < groups.length; gi += 1) {
-      const d = groups[gi].data, l = gLumas[gi][p];
+      const l = gLumas[gi][p];
       const dl = l - 0.5;
       const we = Math.exp(-(dl * dl) / 0.08); // well-exposedness, sigma 0.2
       const contrast = Math.abs(l - gBlurs[gi][p]);
-      const r = d[i4] / 255, gg = d[i4 + 1] / 255, b = d[i4 + 2] / 255;
-      const sat = Math.max(r, gg, b) - Math.min(r, gg, b);
-      const w = we * (contrast + 0.03) * (sat + 0.10);
+      const w = we * (contrast + 0.03);
       ws[gi] = w; wsum += w;
     }
     let r = 0, g = 0, b = 0, ga = 0;
@@ -330,8 +385,8 @@ const STYLES = {
     shadowTarget: 0.21, shadowAmt: 0.36, shadowEdge: 0.34,
     knee: 0.62, kneeKeep: 0.52, // soft highlight roll-off
     contrast: 1.15, // applied to luma only — punch without hue shift
-    microAmt: 0.55,
-    sharpAmt: 0.6, nightSharpAmt: 0.5,
+    microAmt: 0.65, // halo-free texture contrast (noise-floor gated)
+    sharpAmt: 0.6, nightSharpAmt: 0.5, sharpClamp: 0.12, // edge acutance, halo-clamped
     clarityAmt: 0.35, haloGate: 0.08,
     edgeRef: 0.12, sharpBase: 0.15,
     skinProtSharp: 0.50, skinProtMicro: 0.35, skinProtClar: 0.45,
@@ -543,11 +598,17 @@ function fallback(image, mode = "photo", style = "pixel") {
       // Inside the face mask, detail is further dialed back so skin keeps
       // its natural texture instead of being over-sharpened.
       const sk = sampleSkinMask(skin, x, y);
-      const micro = (l - blur[i]) * S.microAmt * Math.max(0.2, Math.min(1, edgeW * 2)) * (1 - sk * S.skinProtMicro);
+      // Micro-contrast is halo-free (symmetric blur difference), so it carries
+      // the texture punch; anything below half the measured noise floor is
+      // zeroed so the boost never amplifies noise. The 3x3 edge term is
+      // halo-clamped — unclamped unsharp masking is what rings black/white edges.
+      let micro = (l - blur[i]) * S.microAmt * Math.max(0.2, Math.min(1, edgeW * 2)) * (1 - sk * S.skinProtMicro);
+      const gate = (data[o + 3] / 255) * 0.1;
+      if (micro > -gate * 0.5 && micro < gate * 0.5) micro = 0;
       const clar = Math.max(-S.haloGate, Math.min(S.haloGate, (l - blurMed[i]) * S.clarityAmt)) * (1 - sk * S.skinProtClar);
       let sharp = (l - neigh) * sharpAmt * (S.sharpBase + (1 - S.sharpBase) * edgeW) * (1 - sk * S.skinProtSharp);
-      const gate = (data[o + 3] / 255) * 0.1;
       if (sharp > -gate && sharp < gate) sharp = 0;
+      sharp = Math.max(-S.sharpClamp, Math.min(S.sharpClamp, sharp));
       const delta = micro + sharp + clar;
       const r = out[o] / 255, g = out[o + 1] / 255, b = out[o + 2] / 255;
       // Detail is luma-only (added equally to all channels): chroma is never
@@ -612,7 +673,7 @@ self.onmessage = async (event) => {
   try {
     await initialize();
     const merged = merge(frames, evs, mode);
-    denoiseMerged(merged.data, merged.width, merged.height, frames.length === 1);
+    denoiseMerged(merged.data, merged.width, merged.height, frames.length);
     // Face-aware skin pass (once per burst): detect faces and build the
     // feathered skin mask that finishing uses to protect skin texture.
     const fp = await facePass(merged.data, merged.width, merged.height);
@@ -632,7 +693,7 @@ self.onmessage = async (event) => {
         microAmt: S.microAmt,
         sharpAmt: mode === "night" ? S.nightSharpAmt : S.sharpAmt,
         clarityAmt: S.clarityAmt, haloGate: S.haloGate,
-        edgeRef: S.edgeRef, sharpBase: S.sharpBase,
+        edgeRef: S.edgeRef, sharpBase: S.sharpBase, sharpClamp: S.sharpClamp,
         skinProtSharp: S.skinProtSharp, skinProtMicro: S.skinProtMicro, skinProtClar: S.skinProtClar,
         skinMask: skinMaskBytes(fp.skinMask),
         faceCount: fp.faces.length,

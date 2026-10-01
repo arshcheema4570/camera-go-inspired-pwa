@@ -267,6 +267,7 @@ const FINISH_COMP_FRAG = FINISH_HEAD + [
   "uniform float haloGate;",
   "uniform float edgeRef;",
   "uniform float sharpBase;",
+  "uniform float sharpClamp;",
   "uniform float skinProtSharp;",
   "uniform float skinProtMicro;",
   "uniform float skinProtClar;",
@@ -289,6 +290,8 @@ const FINISH_COMP_FRAG = FINISH_HEAD + [
   "  float sharp = (l - ln) * sharpAmt * (sharpBase + (1.0 - sharpBase) * edgeW) * (1.0 - skin * skinProtSharp);",
   "  float gate = t4.a * 0.1;",
   "  if (abs(sharp) < gate) sharp = 0.0;",
+  "  sharp = clamp(sharp, -sharpClamp, sharpClamp);",
+  "  if (abs(micro) < gate * 0.5) micro = 0.0;",
   "  float delta = micro + sharp + clar;",
   // Detail is luma-only: chroma passes through untouched (true color).
   "  gl_FragColor = vec4(clamp(c + delta, 0.0, 1.0), 1.0);",
@@ -352,7 +355,7 @@ function initFinishGL(width, height) {
         tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), position: gl.getAttribLocation(progTone, "position") },
         blur: { src: loc(progBlur, "src"), texel: loc(progBlur, "texel"), position: gl.getAttribLocation(progBlur, "position") },
         blurMed: { src: loc(progBlurMed, "src"), texel: loc(progBlurMed, "texel"), position: gl.getAttribLocation(progBlurMed, "position") },
-        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), skinMask: loc(progComp, "skinMask"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), skinProtSharp: loc(progComp, "skinProtSharp"), skinProtMicro: loc(progComp, "skinProtMicro"), skinProtClar: loc(progComp, "skinProtClar"), position: gl.getAttribLocation(progComp, "position") },
+        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), skinMask: loc(progComp, "skinMask"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), sharpClamp: loc(progComp, "sharpClamp"), skinProtSharp: loc(progComp, "skinProtSharp"), skinProtMicro: loc(progComp, "skinProtMicro"), skinProtClar: loc(progComp, "skinProtClar"), position: gl.getAttribLocation(progComp, "position") },
       },
       quad, tex: {}, tgt: {}, w: 0, h: 0,
     };
@@ -462,6 +465,7 @@ async function finishPhotoWebGL(result) {
     gl.uniform1f(U.comp.haloGate, params.haloGate);
     gl.uniform1f(U.comp.edgeRef, params.edgeRef);
     gl.uniform1f(U.comp.sharpBase, params.sharpBase);
+    gl.uniform1f(U.comp.sharpClamp, params.sharpClamp);
     gl.uniform1f(U.comp.skinProtSharp, params.skinProtSharp || 0);
     gl.uniform1f(U.comp.skinProtMicro, params.skinProtMicro || 0);
     gl.uniform1f(U.comp.skinProtClar, params.skinProtClar || 0);
