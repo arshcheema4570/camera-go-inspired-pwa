@@ -217,17 +217,30 @@ const FINISH_TONE_FRAG = FINISH_HEAD + [
   "uniform float shadowTarget;",
   "uniform float shadowAmt;",
   "uniform float shadowEdge;",
+  "uniform float autoBlack;",
+  "uniform float autoWhite;",
+  "uniform float autoContrastMul;",
+  "uniform float autoSaturation;",
+  "uniform float autoShadowMul;",
+  "uniform sampler2D skinMask;",
   "float sstep(float e0, float e1, float x){ float t = clamp((x-e0)/(e1-e0), 0.0, 1.0); return t*t*(3.0-2.0*t); }",
   "void main(){",
   "  vec3 c0 = texture2D(src, uv).rgb * gains;",
   "  float L = dot(c0, vec3(0.2126, 0.7152, 0.0722));",
   "  float Lp = L * exposure;",
+  "  Lp = (Lp - autoBlack) / max(autoWhite - autoBlack, 1e-3);",
   "  Lp = min(Lp, knee) + max(Lp - knee, 0.0) * kneeKeep;",
-  "  Lp = (Lp - 0.5) * contrast + 0.5;",
-  "  Lp += (shadowTarget - Lp) * shadowAmt * sstep(shadowEdge, 0.0, Lp);",
+  "  Lp = (Lp - 0.5) * contrast * autoContrastMul + 0.5;",
+  "  Lp += (shadowTarget - Lp) * shadowAmt * autoShadowMul * sstep(shadowEdge, 0.0, Lp);",
   "  vec3 c = c0 * (L > 1e-6 ? max(Lp / L, 0.0) : 0.0);",
   "  float m = max(max(c.r, c.g), c.b);",
   "  if (m > 1.0) c /= m;",
+  // Auto saturation: hue-preserving chroma scale around luma; dialed back on
+  // skin so faces never go sunburned.
+  "  float sk = texture2D(skinMask, uv).r;",
+  "  float satEff = 1.0 + (autoSaturation - 1.0) * (1.0 - sk * 0.6);",
+  "  float lf = dot(c, vec3(0.2126, 0.7152, 0.0722));",
+  "  c = lf + (c - lf) * satEff;",
   "  gl_FragColor = vec4(clamp(c, 0.0, 1.5) / TONE_SCALE, texture2D(src, uv).a);",
   "}",
 ].join("\n");
@@ -352,7 +365,7 @@ function initFinishGL(width, height) {
       gl, canvas, maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
       prog: { tone: progTone, blur: progBlur, blurMed: progBlurMed, comp: progComp },
       uni: {
-        tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), position: gl.getAttribLocation(progTone, "position") },
+        tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), autoBlack: loc(progTone, "autoBlack"), autoWhite: loc(progTone, "autoWhite"), autoContrastMul: loc(progTone, "autoContrastMul"), autoSaturation: loc(progTone, "autoSaturation"), autoShadowMul: loc(progTone, "autoShadowMul"), skinMask: loc(progTone, "skinMask"), position: gl.getAttribLocation(progTone, "position") },
         blur: { src: loc(progBlur, "src"), texel: loc(progBlur, "texel"), position: gl.getAttribLocation(progBlur, "position") },
         blurMed: { src: loc(progBlurMed, "src"), texel: loc(progBlurMed, "texel"), position: gl.getAttribLocation(progBlurMed, "position") },
         comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), skinMask: loc(progComp, "skinMask"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), sharpClamp: loc(progComp, "sharpClamp"), skinProtSharp: loc(progComp, "skinProtSharp"), skinProtMicro: loc(progComp, "skinProtMicro"), skinProtClar: loc(progComp, "skinProtClar"), position: gl.getAttribLocation(progComp, "position") },
@@ -428,6 +441,14 @@ async function finishPhotoWebGL(result) {
     gl.uniform1f(U.tone.shadowTarget, params.shadowTarget);
     gl.uniform1f(U.tone.shadowAmt, params.shadowAmt);
     gl.uniform1f(U.tone.shadowEdge, params.shadowEdge);
+    gl.uniform1f(U.tone.autoBlack, params.autoBlack);
+    gl.uniform1f(U.tone.autoWhite, params.autoWhite);
+    gl.uniform1f(U.tone.autoContrastMul, params.autoContrastMul);
+    gl.uniform1f(U.tone.autoSaturation, params.autoSaturation);
+    gl.uniform1f(U.tone.autoShadowMul, params.autoShadowMul);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, F.tex.skin);
+    gl.uniform1i(U.tone.skinMask, 1);
+    gl.activeTexture(gl.TEXTURE0);
   });
   finishDraw(F, "blur", F.tgt.blurA.fbo, () => {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.tone.tex);
@@ -680,7 +701,7 @@ function processBurst(frames, evs, finish = "cpu") {
       if (event.data.error) { reject(new Error(event.data.error)); return; }
       // Show which worker version actually processed this photo (diagnoses SW caching).
       const vb = document.getElementById("versionBadge");
-      if (vb && event.data.workerVersion) vb.textContent = "v27/w" + event.data.workerVersion;
+      if (vb && event.data.workerVersion) vb.textContent = "v28/w" + event.data.workerVersion;
       resolve(event.data);
     };
     worker.addEventListener("message", handler);

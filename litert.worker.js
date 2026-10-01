@@ -509,7 +509,7 @@ function specularWBGains(data) {
 // ---- Face-aware skin processing (pico, MIT; cascade: vendor/pico/facefinder) ----
 // Bump WORKER_VERSION with each release; the UI displays it so we can verify
 // which worker actually processed a photo (diagnoses service-worker caching).
-const WORKER_VERSION = 27;
+const WORKER_VERSION = 28;
 // Runs on the merged frame and builds a feathered skin mask so finishing can
 // protect skin texture from over-sharpening. Color is not touched here.
 let picoClassify = null;
@@ -621,6 +621,58 @@ function faceExposureBoost(data, width, height, faces) {
   return Math.min(2.5, Math.max(1.0, 0.42 / Math.max(0.12, subjLuma)));
 }
 
+// ---- Gallery-Go-style auto enhance: content-adaptive parameter prediction ----
+// Instead of a learned model (which needs training data we don't have), the
+// merged frame is analyzed (histogram, saturation, flatness) and the optimal
+// finishing parameters are predicted from it — the same "predict parameters,
+// apply classically" pattern. All adjustments are luma-safe and
+// hue-preserving; saturation is capped and skin-modulated so faces never go
+// sunburned. True-to-eye bounds: enhance, never reinterpret.
+function analyzeAuto(data, width, height) {
+  const hist = new Float32Array(32);
+  let satSum = 0, satN = 0;
+  const stride = 16; // ~160px-equivalent analysis grid
+  for (let y = 0; y < height; y += stride) {
+    for (let x = 0; x < width; x += stride) {
+      const o = (y * width + x) * 4;
+      const r = data[o] / 255, g = data[o + 1] / 255, b = data[o + 2] / 255;
+      const L = r * 0.2126 + g * 0.7152 + b * 0.0722;
+      hist[Math.min(31, (L * 32) | 0)] += 1;
+      const mx = Math.max(r, g, b);
+      if (mx > 0.02) { satSum += (mx - Math.min(r, g, b)) / mx; satN += 1; }
+    }
+  }
+  const total = hist.reduce((a, b) => a + b, 0) || 1;
+  const pct = (p) => {
+    let acc = 0; const t = p * total;
+    for (let b = 0; b < 32; b += 1) { acc += hist[b]; if (acc >= t) return (b + 0.5) / 32; }
+    return 1;
+  };
+  return { p1: pct(0.01), p50: pct(0.5), p99: pct(0.99), meanSat: satN ? satSum / satN : 0 };
+}
+
+function computeAutoParams(a, mode, faceBoost) {
+  // Don't double-lift when face-aware AE already boosted exposure.
+  const damp = faceBoost > 1 ? 1 / Math.sqrt(faceBoost) : 1;
+  const night = mode === "night";
+  const range = a.p99 - a.p1;
+  // Auto levels: gentle stretch toward full range, never clipping to pure black.
+  const black = Math.min(a.p1 * 0.5, 0.06) * damp;
+  const white = 1 - Math.min((1 - a.p99) * 0.5, 0.06) * damp;
+  // Contrast: flat images get punch, already-wide images are left alone.
+  const flat = Math.max(0, Math.min(1, (0.55 - range) / 0.25));
+  const wide = Math.max(0, Math.min(1, (range - 0.75) / 0.2));
+  let contrastMul = 1 + (0.20 * flat - 0.05 * wide) * damp;
+  // Saturation: lift dull images only; vivid ones pass through (true-to-eye).
+  const dull = Math.max(0, Math.min(1, (0.10 - a.meanSat) / 0.08));
+  let saturation = 1 + 0.12 * dull * damp;
+  // Shadow lift: only when shadows are crushed and it's not a night shot.
+  const crushed = (!night && a.p1 < 0.05 && a.p50 < 0.35) ? 1 : 0;
+  const shadowMul = 1 + 0.35 * crushed * damp;
+  if (night) { contrastMul = 1 + (contrastMul - 1) * 0.5; saturation = 1 + (saturation - 1) * 0.5; }
+  return { black, white, contrastMul, saturation, shadowMul };
+}
+
 function skinMaskBytes(mask) {
   const out = new Uint8Array(mask.data.length);
   for (let i = 0; i < out.length; i += 1) out[i] = Math.round(Math.min(1, mask.data[i]) * 255);
@@ -669,6 +721,9 @@ function fallback(image, mode = "photo", style = "pixel") {
   const skin = image.skin || null;
   const faceBoost = image.faceBoost || 1.0;
   const exposure = (mode === "night" ? S.nightExposure : S.exposure) * faceBoost;
+  // Auto enhance params (computed once per burst in onmessage); neutral when absent.
+  const auto = image.auto || { black: 0, white: 1, contrastMul: 1, saturation: 1, shadowMul: 1 };
+  const autoRange = Math.max(1e-3, auto.white - auto.black);
   const luma = new Float32Array(count);
   const out = new Uint8ClampedArray(count * 4);
 
@@ -684,16 +739,25 @@ function fallback(image, mode = "photo", style = "pixel") {
     const b0 = (data[o + 2] / 255) * gb;
     const L = r0 * 0.2126 + g0 * 0.7152 + b0 * 0.0722;
     let Lp = L * exposure;
+    Lp = (Lp - auto.black) / autoRange; // auto levels: gentle stretch toward full range
     if (Lp > S.knee) Lp = S.knee + (Lp - S.knee) * S.kneeKeep;
-    Lp = (Lp - 0.5) * S.contrast + 0.5;
-    Lp += (S.shadowTarget - Lp) * S.shadowAmt * smoothstep(S.shadowEdge, 0.0, Lp);
+    Lp = (Lp - 0.5) * S.contrast * auto.contrastMul + 0.5;
+    Lp += (S.shadowTarget - Lp) * S.shadowAmt * auto.shadowMul * smoothstep(S.shadowEdge, 0.0, Lp);
     const s = L > 1e-6 ? Math.max(0, Lp / L) : 0;
     let r = r0 * s, g = g0 * s, b = b0 * s;
     // Hue-perfect highlight guard: if any channel would clip, scale all three
     // by the max — chromaticity is preserved exactly, never hue-shifted.
     const m = Math.max(r, g, b);
     if (m > 1) { r /= m; g /= m; b /= m; }
-    const l = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    // Auto saturation: hue-preserving chroma scale around luma (radial in
+    // chroma space, so hue never shifts). Dialed back inside the skin mask so
+    // faces never go sunburned.
+    const px = i % width, py = (i / width) | 0;
+    const sk1 = sampleSkinMask(skin, px, py);
+    const satEff = 1 + (auto.saturation - 1) * (1 - sk1 * 0.6);
+    const lf = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    r = lf + (r - lf) * satEff; g = lf + (g - lf) * satEff; b = lf + (b - lf) * satEff;
+    const l = Math.max(0, Math.min(1, lf));
     luma[i] = l;
     out[o] = Math.max(0, Math.min(255, r * 255));
     out[o + 1] = Math.max(0, Math.min(255, g * 255));
@@ -811,6 +875,9 @@ self.onmessage = async (event) => {
     // Face-aware exposure: boost if the subject is underexposed (camera AE
     // metered on a bright background). Applied in finishing via exposure.
     merged.faceBoost = faceExposureBoost(merged.data, merged.width, merged.height, fp.faces);
+    // Auto enhance: analyze the merged frame and predict optimal finishing
+    // parameters (levels, contrast, saturation, shadow lift).
+    merged.auto = computeAutoParams(analyzeAuto(merged.data, merged.width, merged.height), mode, merged.faceBoost);
     if (!runner && finish === "webgl") {
       // WebGL finishing runs on the main thread: hand over the merged frame
       // plus specular WB gains and fully-resolved style params. The CPU
@@ -829,6 +896,9 @@ self.onmessage = async (event) => {
         skinProtSharp: S.skinProtSharp, skinProtMicro: S.skinProtMicro, skinProtClar: S.skinProtClar,
         skinMask: skinMaskBytes(fp.skinMask),
         faceCount: fp.faces.length,
+        autoBlack: merged.auto.black, autoWhite: merged.auto.white,
+        autoContrastMul: merged.auto.contrastMul, autoSaturation: merged.auto.saturation,
+        autoShadowMul: merged.auto.shadowMul,
       };
       const elapsedMs = Math.round(performance.now() - started);
       self.postMessage({ id, type: "result", workerVersion: WORKER_VERSION, width: merged.width, height: merged.height, data: merged.data, params, pendingFinish: true, elapsedMs, engine, status }, [merged.data.buffer]);
