@@ -581,6 +581,43 @@ async function facePass(data, width, height) {
   return { faces, skinMask };
 }
 
+// Face-aware exposure: meter the largest face (or image center as fallback)
+// and boost exposure if the subject is underexposed. This compensates for
+// cameras whose auto-exposure meters on bright backgrounds (window behind
+// subject) instead of the face — stock camera apps do face-aware AE, Lumen's
+// bracket base does not. Digital boost, so it amplifies noise, but a bright
+// noisy face beats an unusably dark one. Applied as part of the exposure
+// multiplier in finishing (both CPU and WebGL paths).
+function faceExposureBoost(data, width, height, faces) {
+  let cx, cy, r;
+  if (faces && faces.length > 0) {
+    let best = faces[0];
+    for (const f of faces) if (f.r > best.r) best = f;
+    cx = best.x; cy = best.y; r = best.r * 0.7; // inner face, avoid background
+  } else {
+    // No face detected (too dark for pico, or no face): center-weighted meter.
+    cx = width / 2; cy = height / 2; r = Math.min(width, height) * 0.2;
+  }
+  let sum = 0, n = 0;
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(width - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(height - 1, Math.ceil(cy + r));
+  for (let y = y0; y <= y1; y += 3) {
+    for (let x = x0; x <= x1; x += 3) {
+      const dx = x - cx, dy = y - cy;
+      if (dx * dx + dy * dy > r * r) continue;
+      const o = (y * width + x) * 4;
+      sum += (data[o] * 0.299 + data[o + 1] * 0.587 + data[o + 2] * 0.114) / 255;
+      n += 1;
+    }
+  }
+  if (n === 0) return 1.0;
+  const subjLuma = sum / n;
+  // Target ~0.42 for a well-exposed face. Only boost when clearly dark;
+  // clamp to 2.5x to avoid extreme noise amplification.
+  if (subjLuma >= 0.35) return 1.0;
+  return Math.min(2.5, Math.max(1.0, 0.42 / Math.max(0.12, subjLuma)));
+}
+
 function skinMaskBytes(mask) {
   const out = new Uint8Array(mask.data.length);
   for (let i = 0; i < out.length; i += 1) out[i] = Math.round(Math.min(1, mask.data[i]) * 255);
@@ -627,7 +664,8 @@ function fallback(image, mode = "photo", style = "pixel") {
   // nailed WB the highlights are neutral and the gains come out ~[1,1,1].
   const [gr, gg, gb] = specularWBGains(data);
   const skin = image.skin || null;
-  const exposure = mode === "night" ? S.nightExposure : S.exposure;
+  const faceBoost = image.faceBoost || 1.0;
+  const exposure = (mode === "night" ? S.nightExposure : S.exposure) * faceBoost;
   const luma = new Float32Array(count);
   const out = new Uint8ClampedArray(count * 4);
 
@@ -767,6 +805,9 @@ self.onmessage = async (event) => {
     const fp = await facePass(merged.data, merged.width, merged.height);
     merged.skin = fp.skinMask;
     merged.faceCount = fp.faces.length;
+    // Face-aware exposure: boost if the subject is underexposed (camera AE
+    // metered on a bright background). Applied in finishing via exposure.
+    merged.faceBoost = faceExposureBoost(merged.data, merged.width, merged.height, fp.faces);
     if (!runner && finish === "webgl") {
       // WebGL finishing runs on the main thread: hand over the merged frame
       // plus specular WB gains and fully-resolved style params. The CPU
@@ -775,7 +816,7 @@ self.onmessage = async (event) => {
       const [gr, gg, gb] = specularWBGains(merged.data);
       const params = {
         gains: [gr, gg, gb],
-        exposure: mode === "night" ? S.nightExposure : S.exposure,
+        exposure: (mode === "night" ? S.nightExposure : S.exposure) * merged.faceBoost,
         knee: S.knee, kneeKeep: S.kneeKeep, contrast: S.contrast,
         shadowTarget: S.shadowTarget, shadowAmt: S.shadowAmt, shadowEdge: S.shadowEdge,
         microAmt: S.microAmt,
