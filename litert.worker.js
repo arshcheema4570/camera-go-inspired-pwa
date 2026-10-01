@@ -507,6 +507,9 @@ function specularWBGains(data) {
 }
 
 // ---- Face-aware skin processing (pico, MIT; cascade: vendor/pico/facefinder) ----
+// Bump WORKER_VERSION with each release; the UI displays it so we can verify
+// which worker actually processed a photo (diagnoses service-worker caching).
+const WORKER_VERSION = 27;
 // Runs on the merged frame and builds a feathered skin mask so finishing can
 // protect skin texture from over-sharpening. Color is not touched here.
 let picoClassify = null;
@@ -828,15 +831,15 @@ self.onmessage = async (event) => {
         faceCount: fp.faces.length,
       };
       const elapsedMs = Math.round(performance.now() - started);
-      self.postMessage({ id, type: "result", width: merged.width, height: merged.height, data: merged.data, params, pendingFinish: true, elapsedMs, engine, status }, [merged.data.buffer]);
+      self.postMessage({ id, type: "result", workerVersion: WORKER_VERSION, width: merged.width, height: merged.height, data: merged.data, params, pendingFinish: true, elapsedMs, engine, status }, [merged.data.buffer]);
       return;
     }
     const image = runner ? await neural(merged) : { ...merged, data: fallback(merged, mode, style) };
     const elapsedMs = Math.round(performance.now() - started);
-    self.postMessage({ id, type: "result", width: image.width, height: image.height, data: image.data, elapsedMs, engine, status }, [image.data.buffer]);
+    self.postMessage({ id, type: "result", workerVersion: WORKER_VERSION, width: image.width, height: image.height, data: image.data, elapsedMs, engine, status }, [image.data.buffer]);
   } catch (error) {
     const merged = merge(frames, evs, mode); const data = fallback(merged, mode, style);
-    self.postMessage({ id, type: "result", width: merged.width, height: merged.height, data, elapsedMs: Math.round(performance.now() - started), engine: "Fallback", status: "FALLBACK_MODE", warning: error.message }, [data.buffer]);
+    self.postMessage({ id, type: "result", workerVersion: WORKER_VERSION, width: merged.width, height: merged.height, data, elapsedMs: Math.round(performance.now() - started), engine: "Fallback", status: "FALLBACK_MODE", warning: error.message }, [data.buffer]);
   }
 };
 

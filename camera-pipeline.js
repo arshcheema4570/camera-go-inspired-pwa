@@ -674,7 +674,15 @@ async function captureHardwareStills() {
 function processBurst(frames, evs, finish = "cpu") {
   return new Promise((resolve, reject) => {
     const id = ++requestId;
-    const handler = (event) => { if (event.data.id !== id) return; worker.removeEventListener("message", handler); event.data.error ? reject(new Error(event.data.error)) : resolve(event.data); };
+    const handler = (event) => {
+      if (event.data.id !== id) return;
+      worker.removeEventListener("message", handler);
+      if (event.data.error) { reject(new Error(event.data.error)); return; }
+      // Show which worker version actually processed this photo (diagnoses SW caching).
+      const vb = document.getElementById("versionBadge");
+      if (vb && event.data.workerVersion) vb.textContent = "v27/w" + event.data.workerVersion;
+      resolve(event.data);
+    };
     worker.addEventListener("message", handler);
     // WebGL path: structured-clone the frames (no transfer) so the main thread
     // retains them for the CPU fallback if GL finishing fails.
