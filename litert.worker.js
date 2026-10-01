@@ -59,8 +59,77 @@ function resize(image, targetWidth = 0, targetHeight = 0) {
      partially failed — the multi-frame paths already have temporal
      denoise), a small 3x3 edge-preserving bilateral on luma. Alpha
      (the noise-adaptive sharpen gate) is preserved throughout. */
+/* Noise estimation (Immerkaer-style): the 30th percentile of the absolute
+   Laplacian response, sampled on a stride-4 grid (robust to edges/texture
+   which inflate a plain mean). Returns luma noise sigma in 0-1. */
+function estimateNoise(Y, width, height) {
+  const hist = new Uint32Array(256);
+  let total = 0;
+  for (let y = 2; y < height - 2; y += 4) {
+    for (let x = 2; x < width - 2; x += 4) {
+      const p = y * width + x;
+      const lap = Math.abs(4 * Y[p] - Y[p - 1] - Y[p + 1] - Y[p - width] - Y[p + width]);
+      const m = Math.min(255, (lap * 255) | 0);
+      hist[m] += 1; total += 1;
+    }
+  }
+  if (total === 0) return 0.01;
+  const target = total * 0.3;
+  let acc = 0, p30 = 0;
+  for (let i = 0; i < 256; i += 1) { acc += hist[i]; if (acc >= target) { p30 = i; break; } }
+  // Laplacian(4,-1,-1,-1,-1): 30th percentile of |Lap| ~= 2 * sigma (empirical).
+  return Math.min(0.08, Math.max(0.004, (p30 / 255) * 0.5));
+}
+
+/* Edge-aware 3x3 smoothing with tent range weights (no exp(), fast).
+   Used for luma (bilateralLuma) and luma-guided chroma (guidedChroma):
+   flat areas get smoothed, but pixels across a strong edge get ~zero weight,
+   so hair strands, skin pores and texture edges survive the denoise. */
+const SMOOTH_KERNEL = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+function bilateralLuma(Y, width, height, rangeSigma) {
+  const out = new Float32Array(Y.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const p = y * width + x, yc = Y[p];
+      let s = 0, sw = 0, k = 0;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const row = Math.min(height - 1, Math.max(0, y + dy)) * width;
+        for (let dx = -1; dx <= 1; dx += 1, k += 1) {
+          const q = row + Math.min(width - 1, Math.max(0, x + dx));
+          const rw = 1 - Math.min(1, Math.abs(Y[q] - yc) / rangeSigma);
+          const w = SMOOTH_KERNEL[k] * rw;
+          s += Y[q] * w; sw += w;
+        }
+      }
+      out[p] = s / sw; // center pixel always contributes (rw=1), so sw > 0
+    }
+  }
+  return out;
+}
+function guidedChroma(Co, Cg, Y, width, height, rangeSigma) {
+  const CoO = new Float32Array(Co.length), CgO = new Float32Array(Cg.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const p = y * width + x, yc = Y[p];
+      let sco = 0, scg = 0, sw = 0, k = 0;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const row = Math.min(height - 1, Math.max(0, y + dy)) * width;
+        for (let dx = -1; dx <= 1; dx += 1, k += 1) {
+          const q = row + Math.min(width - 1, Math.max(0, x + dx));
+          // Guidance is LUMA: chroma is smoothed within smooth-luma regions
+          // but preserved across luma edges (where color detail lives).
+          const rw = 1 - Math.min(1, Math.abs(Y[q] - yc) / rangeSigma);
+          const w = SMOOTH_KERNEL[k] * rw;
+          sco += Co[q] * w; scg += Cg[q] * w; sw += w;
+        }
+      }
+      CoO[p] = sco / sw; CgO[p] = scg / sw;
+    }
+  }
+  return [CoO, CgO];
+}
+
 function denoiseMerged(data, width, height, frameCount) {
-  const single = frameCount === 1;
   const n = width * height;
   const Y = new Float32Array(n), Co = new Float32Array(n), Cg = new Float32Array(n);
   for (let p = 0; p < n; p += 1) {
@@ -70,30 +139,39 @@ function denoiseMerged(data, width, height, frameCount) {
     Co[p] = r * 0.5 - b * 0.5;
     Cg[p] = -r * 0.25 + g * 0.5 - b * 0.25;
   }
-  if (single) {
-    const out = new Float32Array(n);
-    const ss2 = 2 * 1.2 * 1.2, sr2 = 2 * 0.11 * 0.11; // spatial sigma 1.2px, range sigma ~28/255
-    for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
-      const p = y * width + x, yc = Y[p];
-      let s = 0, sw = 0;
-      for (let dy = -1; dy <= 1; dy += 1) for (let dx = -1; dx <= 1; dx += 1) {
-        const xx = Math.min(width - 1, Math.max(0, x + dx)), yy = Math.min(height - 1, Math.max(0, y + dy));
-        const q = yy * width + xx, dd = Y[q] - yc;
-        const wt = Math.exp(-(dx * dx + dy * dy) / ss2 - (dd * dd) / sr2);
-        s += Y[q] * wt; sw += wt;
-      }
-      out[p] = s / sw;
-    }
-    Y.set(out);
+  // Noise-adaptive, edge-aware denoising. Temporal averaging already cut noise
+  // by ~sqrt(frameCount); we clean the residual. Strength follows the MEASURED
+  // noise (not a fixed guess): clean daylight shots are barely touched (detail
+  // preserved), noisy shots get real smoothing. Both filters are edge-aware,
+  // so hair, skin pores and texture survive while flat areas get cleaned.
+  const noiseSigma = estimateNoise(Y, width, height);
+  const residual = noiseSigma / Math.sqrt(frameCount);
+  // Luma: bilateral, range ~4x residual noise (covers the noise distribution
+  // so flat areas smooth well, while real edges — far above the noise floor —
+  // get ~zero weight and survive). Skip when already clean.
+  if (residual > 0.008) {
+    Y.set(bilateralLuma(Y, width, height, Math.min(0.16, residual * 4)));
   }
-  // Chroma denoise scaled by temporal averaging: N merged frames already cut
-  // chroma noise by ~sqrt(N), so heavy blurring beyond that only erases fine
-  // color detail (fabric weave, foliage). Single frames keep the full clean-up.
-  const chromaR = single ? 8 : (frameCount >= 6 ? 0 : 2);
-  const CoB = chromaR > 0 ? blurLumaSeparable(Co, width, height, chromaR) : Co;
-  const CgB = chromaR > 0 ? blurLumaSeparable(Cg, width, height, chromaR) : Cg;
+  // Chroma: luma-guided smoothing, blended by frame count. Single frames need
+  // it most; large bursts keep a light touch. Guidance preserves color detail
+  // at luma edges at any strength (unlike the old blind blur).
+  const chromaAmt = frameCount === 1 ? 1.0 : (frameCount >= 6 ? 0.35 : 0.6);
+  if (residual > 0.006) {
+    const chromaRange = Math.min(0.16, Math.max(0.012, residual * 5));
+    // Single frames get two guided passes (larger effective radius) since
+    // they have no temporal averaging to fall back on.
+    const passes = frameCount === 1 ? 2 : 1;
+    for (let pass = 0; pass < passes; pass += 1) {
+      const [CoS, CgS] = guidedChroma(Co, Cg, Y, width, height, chromaRange);
+      const inv = 1 - chromaAmt;
+      for (let p = 0; p < n; p += 1) {
+        Co[p] = Co[p] * inv + CoS[p] * chromaAmt;
+        Cg[p] = Cg[p] * inv + CgS[p] * chromaAmt;
+      }
+    }
+  }
   for (let p = 0; p < n; p += 1) {
-    const i4 = p * 4, y = Y[p], co = CoB[p], cg = CgB[p];
+    const i4 = p * 4, y = Y[p], co = Co[p], cg = Cg[p];
     data[i4] = (y + co - cg) * 255;
     data[i4 + 1] = (y + cg) * 255;
     data[i4 + 2] = (y - co - cg) * 255;
@@ -385,11 +463,11 @@ const STYLES = {
     shadowTarget: 0.21, shadowAmt: 0.36, shadowEdge: 0.34,
     knee: 0.62, kneeKeep: 0.52, // soft highlight roll-off
     contrast: 1.15, // applied to luma only — punch without hue shift
-    microAmt: 0.65, // halo-free texture contrast (noise-floor gated)
+    microAmt: 0.75, // halo-free texture contrast (noise-floor gated)
     sharpAmt: 0.6, nightSharpAmt: 0.5, sharpClamp: 0.12, // edge acutance, halo-clamped
     clarityAmt: 0.35, haloGate: 0.08,
     edgeRef: 0.12, sharpBase: 0.15,
-    skinProtSharp: 0.50, skinProtMicro: 0.35, skinProtClar: 0.45,
+    skinProtSharp: 0.40, skinProtMicro: 0.25, skinProtClar: 0.45,
   },
 };
 function smoothstep(edge0, edge1, x) {
