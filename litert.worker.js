@@ -78,7 +78,10 @@ function estimateNoise(Y, width, height) {
   let acc = 0, p30 = 0;
   for (let i = 0; i < 256; i += 1) { acc += hist[i]; if (acc >= target) { p30 = i; break; } }
   // Laplacian(4,-1,-1,-1,-1): 30th percentile of |Lap| ~= 2 * sigma (empirical).
-  return Math.min(0.08, Math.max(0.004, (p30 / 255) * 0.5));
+  // Capped at 0.03: above that the "noise" is usually dense texture (beard,
+  // fabric), not noise — smoothing it would erase real detail. When in doubt,
+  // preserve detail; residual grain is better than wax.
+  return Math.min(0.03, Math.max(0.004, (p30 / 255) * 0.5));
 }
 
 /* Edge-aware 3x3 smoothing with tent range weights (no exp(), fast).
@@ -148,16 +151,17 @@ function denoiseMerged(data, width, height, frameCount) {
   const residual = noiseSigma / Math.sqrt(frameCount);
   // Luma: bilateral, range ~4x residual noise (covers the noise distribution
   // so flat areas smooth well, while real edges — far above the noise floor —
-  // get ~zero weight and survive). Skip when already clean.
+  // get ~zero weight and survive). Range capped at 0.06: wider would start
+  // eating texture (beard, pores), not just noise. Skip when already clean.
   if (residual > 0.008) {
-    Y.set(bilateralLuma(Y, width, height, Math.min(0.16, residual * 4)));
+    Y.set(bilateralLuma(Y, width, height, Math.min(0.06, residual * 4)));
   }
   // Chroma: luma-guided smoothing, blended by frame count. Single frames need
   // it most; large bursts keep a light touch. Guidance preserves color detail
   // at luma edges at any strength (unlike the old blind blur).
   const chromaAmt = frameCount === 1 ? 1.0 : (frameCount >= 6 ? 0.35 : 0.6);
   if (residual > 0.006) {
-    const chromaRange = Math.min(0.16, Math.max(0.012, residual * 5));
+    const chromaRange = Math.min(0.06, Math.max(0.012, residual * 5));
     // Single frames get two guided passes (larger effective radius) since
     // they have no temporal averaging to fall back on.
     const passes = frameCount === 1 ? 2 : 1;
@@ -492,8 +496,14 @@ function specularWBGains(data) {
     if (l >= 0.78 && l <= 0.96) { sr += data[i]; sg += data[i + 1]; sb += data[i + 2]; n += 1; }
   }
   if (n < total * 0.001 || sr <= 0 || sb <= 0) return [1, 1, 1];
-  const clamp = (v) => Math.max(0.91, Math.min(1.10, v));
-  return [clamp((sg / n) / (sr / n)), 1, clamp((sg / n) / (sb / n))];
+  const r = sr / n, g = sg / n, b = sb / n;
+  // If the "highlights" are strongly colored, they're a colored light source
+  // (car LEDs, neon), not a neutral illuminant — trust the ISP's WB and don't
+  // touch color. Only correct near-neutral highlights (white ceiling, etc.).
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  if ((mx - mn) / mx > 0.18) return [1, 1, 1];
+  const clamp = (v) => Math.max(0.94, Math.min(1.06, v));
+  return [clamp(g / r), 1, clamp(g / b)];
 }
 
 // ---- Face-aware skin processing (pico, MIT; cascade: vendor/pico/facefinder) ----
