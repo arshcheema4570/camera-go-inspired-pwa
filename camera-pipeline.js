@@ -184,7 +184,7 @@ function renderLiveFrame() {
                         ~radius 8 clarity band; CPU uses blurLumaSeparable
                         r=8 — same scale, slightly different kernel shape)
      comp : tone + blurred luma -> canvas (micro-contrast, clarity,
-            gradient-weighted noise-gated edge sharpening, vibrance)
+            gradient-weighted noise-gated edge sharpening)
    The sharpen gate is per-pixel, packed by the worker into the merged
    frame's alpha channel (byte = clamp(gate/0.1)*255); the tone pass
    preserves source alpha so the composite can read it.
@@ -205,8 +205,10 @@ let finishGL = null;
 const FINISH_VERT = "attribute vec2 position; varying vec2 uv; void main(){ uv=(position+1.0)*0.5; gl_Position=vec4(position,0.0,1.0); }";
 const FINISH_HEAD = "#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n#define TONE_SCALE 1.5\nvarying vec2 uv;\n";
 const FINISH_TONE_FRAG = FINISH_HEAD + [
+  // True color: tone curve runs on luma only; RGB scales by the luma ratio so
+  // hue and saturation pass through exactly as captured. No temp/saturation
+  // shifts, no skin recolor — punch comes from luminance only.
   "uniform sampler2D src;",
-  "uniform sampler2D skinMask;",
   "uniform vec3 gains;",
   "uniform float exposure;",
   "uniform float knee;",
@@ -215,21 +217,17 @@ const FINISH_TONE_FRAG = FINISH_HEAD + [
   "uniform float shadowTarget;",
   "uniform float shadowAmt;",
   "uniform float shadowEdge;",
-  "uniform float tempR;",
-  "uniform float tempB;",
-  "uniform float saturation;",
-  "uniform float skinWarmAmt;",
-  "vec3 sstepv(float e0, float e1, vec3 x){ vec3 t = clamp((x-e0)/(e1-e0), 0.0, 1.0); return t*t*(3.0-2.0*t); }",
+  "float sstep(float e0, float e1, float x){ float t = clamp((x-e0)/(e1-e0), 0.0, 1.0); return t*t*(3.0-2.0*t); }",
   "void main(){",
-  "  vec3 c = texture2D(src, uv).rgb * gains * exposure;",
-  "  c = min(c, vec3(knee)) + max(c - vec3(knee), vec3(0.0)) * kneeKeep;",
-  "  c = (c - 0.5) * contrast + 0.5;",
-  "  c += (vec3(shadowTarget) - c) * shadowAmt * sstepv(shadowEdge, 0.0, c);",
-  "  c.r *= tempR; c.b *= tempB;",
-  "  float skin = texture2D(skinMask, uv).r;",
-  "  c.r *= (1.0 + skin * skinWarmAmt); c.b *= (1.0 - skin * skinWarmAmt);",
-  "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));",
-  "  c = l + (c - l) * saturation;",
+  "  vec3 c0 = texture2D(src, uv).rgb * gains;",
+  "  float L = dot(c0, vec3(0.2126, 0.7152, 0.0722));",
+  "  float Lp = L * exposure;",
+  "  Lp = min(Lp, knee) + max(Lp - knee, 0.0) * kneeKeep;",
+  "  Lp = (Lp - 0.5) * contrast + 0.5;",
+  "  Lp += (shadowTarget - Lp) * shadowAmt * sstep(shadowEdge, 0.0, Lp);",
+  "  vec3 c = c0 * (L > 1e-6 ? max(Lp / L, 0.0) : 0.0);",
+  "  float m = max(max(c.r, c.g), c.b);",
+  "  if (m > 1.0) c /= m;",
   "  gl_FragColor = vec4(clamp(c, 0.0, 1.5) / TONE_SCALE, texture2D(src, uv).a);",
   "}",
 ].join("\n");
@@ -272,7 +270,6 @@ const FINISH_COMP_FRAG = FINISH_HEAD + [
   "uniform float skinProtSharp;",
   "uniform float skinProtMicro;",
   "uniform float skinProtClar;",
-  "uniform float vibrance;",
   "float tl(vec2 p){ return dot(texture2D(tone, p).rgb * TONE_SCALE, vec3(0.2126, 0.7152, 0.0722)); }",
   "void main(){",
   "  vec4 t4 = texture2D(tone, uv);",
@@ -293,9 +290,8 @@ const FINISH_COMP_FRAG = FINISH_HEAD + [
   "  float gate = t4.a * 0.1;",
   "  if (abs(sharp) < gate) sharp = 0.0;",
   "  float delta = micro + sharp + clar;",
-  "  float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);",
-  "  float vib = 1.0 + (1.0 - min(1.0, sat * 2.4)) * vibrance;",
-  "  gl_FragColor = vec4(clamp(l + (c - l) * vib + delta, 0.0, 1.0), 1.0);",
+  // Detail is luma-only: chroma passes through untouched (true color).
+  "  gl_FragColor = vec4(clamp(c + delta, 0.0, 1.0), 1.0);",
   "}",
 ].join("\n");
 
@@ -353,10 +349,10 @@ function initFinishGL(width, height) {
       gl, canvas, maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
       prog: { tone: progTone, blur: progBlur, blurMed: progBlurMed, comp: progComp },
       uni: {
-        tone: { src: loc(progTone, "src"), skinMask: loc(progTone, "skinMask"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), tempR: loc(progTone, "tempR"), tempB: loc(progTone, "tempB"), saturation: loc(progTone, "saturation"), skinWarmAmt: loc(progTone, "skinWarmAmt"), position: gl.getAttribLocation(progTone, "position") },
+        tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), position: gl.getAttribLocation(progTone, "position") },
         blur: { src: loc(progBlur, "src"), texel: loc(progBlur, "texel"), position: gl.getAttribLocation(progBlur, "position") },
         blurMed: { src: loc(progBlurMed, "src"), texel: loc(progBlurMed, "texel"), position: gl.getAttribLocation(progBlurMed, "position") },
-        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), skinMask: loc(progComp, "skinMask"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), skinProtSharp: loc(progComp, "skinProtSharp"), skinProtMicro: loc(progComp, "skinProtMicro"), skinProtClar: loc(progComp, "skinProtClar"), vibrance: loc(progComp, "vibrance"), position: gl.getAttribLocation(progComp, "position") },
+        comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), skinMask: loc(progComp, "skinMask"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), skinProtSharp: loc(progComp, "skinProtSharp"), skinProtMicro: loc(progComp, "skinProtMicro"), skinProtClar: loc(progComp, "skinProtClar"), position: gl.getAttribLocation(progComp, "position") },
       },
       quad, tex: {}, tgt: {}, w: 0, h: 0,
     };
@@ -421,8 +417,6 @@ async function finishPhotoWebGL(result) {
   finishDraw(F, "tone", F.tgt.tone.fbo, () => {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tex.src);
     gl.uniform1i(U.tone.src, 0);
-    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, F.tex.skin);
-    gl.uniform1i(U.tone.skinMask, 3);
     gl.uniform3f(U.tone.gains, params.gains[0], params.gains[1], params.gains[2]);
     gl.uniform1f(U.tone.exposure, params.exposure);
     gl.uniform1f(U.tone.knee, params.knee);
@@ -431,10 +425,6 @@ async function finishPhotoWebGL(result) {
     gl.uniform1f(U.tone.shadowTarget, params.shadowTarget);
     gl.uniform1f(U.tone.shadowAmt, params.shadowAmt);
     gl.uniform1f(U.tone.shadowEdge, params.shadowEdge);
-    gl.uniform1f(U.tone.tempR, params.tempR);
-    gl.uniform1f(U.tone.tempB, params.tempB);
-    gl.uniform1f(U.tone.saturation, params.saturation);
-    gl.uniform1f(U.tone.skinWarmAmt, params.skinWarmAmt || 0);
   });
   finishDraw(F, "blur", F.tgt.blurA.fbo, () => {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.tone.tex);
@@ -475,7 +465,6 @@ async function finishPhotoWebGL(result) {
     gl.uniform1f(U.comp.skinProtSharp, params.skinProtSharp || 0);
     gl.uniform1f(U.comp.skinProtMicro, params.skinProtMicro || 0);
     gl.uniform1f(U.comp.skinProtClar, params.skinProtClar || 0);
-    gl.uniform1f(U.comp.vibrance, params.vibrance);
   });
   gl.activeTexture(gl.TEXTURE0);
   const blob = await new Promise((resolve) => F.canvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));

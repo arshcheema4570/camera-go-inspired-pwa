@@ -313,27 +313,28 @@ function merge(frames, evs, mode) {
    Pixel look: deeper HDR contrast, stronger highlight recovery and
      shadow lift, higher micro-contrast (structure), slightly cool tone.
    Shared: clamped gray-world auto WB (cast removal only),
-     micro-contrast (structure) + gated edge sharpening, vibrance.
+     micro-contrast (structure) + gated edge sharpening.
    Portrait face tricks (lens blur / spotlight / skin smoothing) are
    intentionally omitted — no face landmarks in this pipeline.
    ------------------------------------------------------------------ */
-/* Photo style: a single Pixel-inspired look (the iPhone style was removed at
-   the user's request — he wants Pixel-style photos from the PWA). */
+/* Photo style: a single Pixel-inspired look.
+   Color philosophy (v21 "true color"): the phone ISP already white-balanced
+   and color-corrected the frames, so the pipeline must NOT re-interpret
+   color. Tone mapping runs on luminance only (chroma-preserving luma-ratio
+   scaling) so hue and saturation pass through exactly as captured; there are
+   no saturation/vibrance boosts and no temperature shifts. Punch comes from
+   luminance contrast, clarity, and edge sharpening — never from chroma. */
 const STYLES = {
   pixel: {
     exposure: 1.08, nightExposure: 1.28,
     shadowTarget: 0.21, shadowAmt: 0.36, shadowEdge: 0.34,
-    knee: 0.62, kneeKeep: 0.52, // soft highlight roll-off (skin-friendly)
-    contrast: 1.15,
-    tempR: 1.002, tempB: 1.000, // near-neutral, a touch warm
-    saturation: 1.05,
+    knee: 0.62, kneeKeep: 0.52, // soft highlight roll-off
+    contrast: 1.15, // applied to luma only — punch without hue shift
     microAmt: 0.55,
     sharpAmt: 0.6, nightSharpAmt: 0.5,
     clarityAmt: 0.35, haloGate: 0.08,
     edgeRef: 0.12, sharpBase: 0.15,
-    skinWarmAmt: 0.030, // per-pixel skin warmth inside the face mask
     skinProtSharp: 0.50, skinProtMicro: 0.35, skinProtClar: 0.45,
-    vibrance: 0.15,
   },
 };
 function smoothstep(edge0, edge1, x) {
@@ -363,9 +364,8 @@ function specularWBGains(data) {
 }
 
 // ---- Face-aware skin processing (pico, MIT; cascade: vendor/pico/facefinder) ----
-// Runs on the merged frame: nudges global WB toward a natural skin locus when
-// faces are present, and builds a feathered skin mask so finishing can warm
-// skin slightly while protecting its texture from over-sharpening.
+// Runs on the merged frame and builds a feathered skin mask so finishing can
+// protect skin texture from over-sharpening. Color is not touched here.
 let picoClassify = null;
 async function ensureFaceDetector() {
   if (picoClassify) return true;
@@ -429,43 +429,19 @@ function buildSkinMask(faces, width, height) {
   return { data: mask, width: mw, height: mh };
 }
 
-function faceWBNudge(data, width, height, faces, gains) {
-  if (!faces.length) return gains;
-  let sr = 0, sg = 0, sb = 0, n = 0;
-  for (const f of faces) {
-    const r = f.r * 0.45; // central disc: likely skin, avoids hair/background
-    for (let k = 0; k < 32; k += 1) {
-      const a = (k / 32) * Math.PI * 2, rr = r * Math.sqrt(((k * 7) % 16) / 16);
-      const x = Math.round(f.x + Math.cos(a) * rr), y = Math.round(f.y + Math.sin(a) * rr * 1.25);
-      if (x < 0 || x >= width || y < 0 || y >= height) continue;
-      const i = (y * width + x) * 4;
-      const R = data[i] / 255, G = data[i + 1] / 255, B = data[i + 2] / 255;
-      const l = R * 0.299 + G * 0.587 + B * 0.114;
-      if (l < 0.07 || l > 0.85) continue; // skip deep shadow and specular
-      sr += R; sg += G; sb += B; n += 1;
-    }
-  }
-  if (n < 8 || sg <= 0) return gains;
-  // Natural skin sits slightly warm-neutral: r/g ~ 1.10, b/g ~ 0.90.
-  // Partial (0.45) correction: fixes illuminant cast without forcing a look.
-  const cr = sr / sg, cb = sb / sg;
-  let [gr, gg, gb] = gains;
-  gr *= Math.pow(1.10 / cr, 0.45);
-  gb *= Math.pow(0.90 / cb, 0.45);
-  const clamp = (v) => Math.max(0.88, Math.min(1.15, v));
-  return [clamp(gr), clamp(gg), clamp(gb)];
+async function facePass(data, width, height) {
+  // Faces are detected only to build the skin mask, which finishing uses to
+  // protect skin texture from over-sharpening. Color is deliberately left
+  // alone: the ISP's white balance is trusted (see "true color" note above).
+  const faces = await detectFaces(data, width, height);
+  const skinMask = buildSkinMask(faces, width, height);
+  return { faces, skinMask };
 }
 
 function skinMaskBytes(mask) {
   const out = new Uint8Array(mask.data.length);
   for (let i = 0; i < out.length; i += 1) out[i] = Math.round(Math.min(1, mask.data[i]) * 255);
   return { data: out, width: mask.width, height: mask.height };
-}
-
-async function facePass(data, width, height, gains) {
-  const faces = await detectFaces(data, width, height);
-  const skinMask = buildSkinMask(faces, width, height);
-  return { faces, skinMask, gains: faceWBNudge(data, width, height, faces, gains) };
 }
 
 function sampleSkinMask(skin, x, y) {
@@ -504,45 +480,37 @@ function fallback(image, mode = "photo", style = "pixel") {
   const count = width * height;
   // Face-aware gains (computed once per burst in onmessage); fall back to
   // plain specular WB when the face pass did not run.
-  const [gr, gg, gb] = image.faceGains || specularWBGains(data);
+  // Specular-highlight white balance. Self-limiting: when the ISP already
+  // nailed WB the highlights are neutral and the gains come out ~[1,1,1].
+  const [gr, gg, gb] = specularWBGains(data);
   const skin = image.skin || null;
   const exposure = mode === "night" ? S.nightExposure : S.exposure;
   const luma = new Float32Array(count);
   const out = new Uint8ClampedArray(count * 4);
 
-  // Pass 1: WB -> exposure -> highlight knee -> contrast ->
-  //         shadow lift -> temperature -> skin warmth -> saturation
+  // Pass 1: WB, then chroma-preserving tone map. Exposure, highlight knee,
+  // contrast, and shadow lift run on LUMA ONLY; RGB is scaled by the luma
+  // ratio, so hue and saturation pass through exactly as the ISP captured
+  // them ("true color"). A gentle per-channel knee afterwards rolls off
+  // clipping highlights film-style instead of hard-clipping them.
   for (let i = 0; i < count; i += 1) {
     const o = i * 4;
-    let r = (data[o] / 255) * gr * exposure;
-    let g = (data[o + 1] / 255) * gg * exposure;
-    let b = (data[o + 2] / 255) * gb * exposure;
-    // highlights: soft knee rescues bright detail (HDR)
-    if (r > S.knee) r = S.knee + (r - S.knee) * S.kneeKeep;
-    if (g > S.knee) g = S.knee + (g - S.knee) * S.kneeKeep;
-    if (b > S.knee) b = S.knee + (b - S.knee) * S.kneeKeep;
-    // contrast: S-curve punch
-    r = (r - 0.5) * S.contrast + 0.5;
-    g = (g - 0.5) * S.contrast + 0.5;
-    b = (b - 0.5) * S.contrast + 0.5;
-    // shadows: smooth lift of dark areas (applied after contrast so it survives)
-    r += (S.shadowTarget - r) * S.shadowAmt * smoothstep(S.shadowEdge, 0.0, r);
-    g += (S.shadowTarget - g) * S.shadowAmt * smoothstep(S.shadowEdge, 0.0, g);
-    b += (S.shadowTarget - b) * S.shadowAmt * smoothstep(S.shadowEdge, 0.0, b);
-    // temperature: near-neutral with a touch of warmth
-    r *= S.tempR; b *= S.tempB;
-    // skin warmth: gentle, only inside the feathered face mask
-    if (skin) {
-      const x0 = i % width, y0 = (i / width) | 0;
-      const w = sampleSkinMask(skin, x0, y0) * S.skinWarmAmt;
-      if (w > 0) { r *= (1 + w); b *= (1 - w); }
-    }
+    const r0 = (data[o] / 255) * gr;
+    const g0 = (data[o + 1] / 255) * gg;
+    const b0 = (data[o + 2] / 255) * gb;
+    const L = r0 * 0.2126 + g0 * 0.7152 + b0 * 0.0722;
+    let Lp = L * exposure;
+    if (Lp > S.knee) Lp = S.knee + (Lp - S.knee) * S.kneeKeep;
+    Lp = (Lp - 0.5) * S.contrast + 0.5;
+    Lp += (S.shadowTarget - Lp) * S.shadowAmt * smoothstep(S.shadowEdge, 0.0, Lp);
+    const s = L > 1e-6 ? Math.max(0, Lp / L) : 0;
+    let r = r0 * s, g = g0 * s, b = b0 * s;
+    // Hue-perfect highlight guard: if any channel would clip, scale all three
+    // by the max — chromaticity is preserved exactly, never hue-shifted.
+    const m = Math.max(r, g, b);
+    if (m > 1) { r /= m; g /= m; b /= m; }
     const l = r * 0.2126 + g * 0.7152 + b * 0.0722;
-    // saturation around luma
-    r = l + (r - l) * S.saturation;
-    g = l + (g - l) * S.saturation;
-    b = l + (b - l) * S.saturation;
-    luma[i] = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    luma[i] = l;
     out[o] = Math.max(0, Math.min(255, r * 255));
     out[o + 1] = Math.max(0, Math.min(255, g * 255));
     out[o + 2] = Math.max(0, Math.min(255, b * 255));
@@ -553,7 +521,8 @@ function fallback(image, mode = "photo", style = "pixel") {
   const blur = blurLumaSeparable(luma, width, height, 2);
 
   // Pass 3: clarity (medium-scale local contrast, halo-clamped) +
-  // micro-contrast + gradient-weighted, noise-gated edge sharpening + vibrance.
+  // micro-contrast + gradient-weighted, noise-gated edge sharpening.
+  // All detail is luma-only, so it never shifts hue or saturation.
   // The sharpen gate is per-pixel, from the merge's temporal-variance estimate
   // packed in the alpha channel (byte = clamp(gate/0.1)*255).
   const sharpAmt = mode === "night" ? S.nightSharpAmt : S.sharpAmt;
@@ -581,11 +550,11 @@ function fallback(image, mode = "photo", style = "pixel") {
       if (sharp > -gate && sharp < gate) sharp = 0;
       const delta = micro + sharp + clar;
       const r = out[o] / 255, g = out[o + 1] / 255, b = out[o + 2] / 255;
-      const sat = Math.max(r, g, b) - Math.min(r, g, b);
-      const vib = 1 + (1 - Math.min(1, sat * 2.4)) * S.vibrance;
-      out[o]     = Math.max(0, Math.min(255, (l + (r - l) * vib + delta) * 255));
-      out[o + 1] = Math.max(0, Math.min(255, (l + (g - l) * vib + delta) * 255));
-      out[o + 2] = Math.max(0, Math.min(255, (l + (b - l) * vib + delta) * 255));
+      // Detail is luma-only (added equally to all channels): chroma is never
+      // touched, so local contrast can't shift hue or saturation.
+      out[o]     = Math.max(0, Math.min(255, (r + delta) * 255));
+      out[o + 1] = Math.max(0, Math.min(255, (g + delta) * 255));
+      out[o + 2] = Math.max(0, Math.min(255, (b + delta) * 255));
     }
   }
   return out;
@@ -644,33 +613,29 @@ self.onmessage = async (event) => {
     await initialize();
     const merged = merge(frames, evs, mode);
     denoiseMerged(merged.data, merged.width, merged.height, frames.length === 1);
-    // Face-aware skin pass (once per burst): detect faces, nudge WB toward a
-    // natural skin locus, build a feathered skin mask for finishing.
-    const fp = await facePass(merged.data, merged.width, merged.height, specularWBGains(merged.data));
+    // Face-aware skin pass (once per burst): detect faces and build the
+    // feathered skin mask that finishing uses to protect skin texture.
+    const fp = await facePass(merged.data, merged.width, merged.height);
     merged.skin = fp.skinMask;
-    merged.faceGains = fp.gains;
     merged.faceCount = fp.faces.length;
     if (!runner && finish === "webgl") {
       // WebGL finishing runs on the main thread: hand over the merged frame
       // plus specular WB gains and fully-resolved style params. The CPU
       // fallback() stays as the automatic safety net if GL fails.
       const S = STYLES[style] || STYLES.pixel;
-      const [gr, gg, gb] = fp.gains;
+      const [gr, gg, gb] = specularWBGains(merged.data);
       const params = {
         gains: [gr, gg, gb],
         exposure: mode === "night" ? S.nightExposure : S.exposure,
         knee: S.knee, kneeKeep: S.kneeKeep, contrast: S.contrast,
         shadowTarget: S.shadowTarget, shadowAmt: S.shadowAmt, shadowEdge: S.shadowEdge,
-        tempR: S.tempR, tempB: S.tempB, saturation: S.saturation,
         microAmt: S.microAmt,
         sharpAmt: mode === "night" ? S.nightSharpAmt : S.sharpAmt,
         clarityAmt: S.clarityAmt, haloGate: S.haloGate,
         edgeRef: S.edgeRef, sharpBase: S.sharpBase,
-        skinWarmAmt: S.skinWarmAmt,
         skinProtSharp: S.skinProtSharp, skinProtMicro: S.skinProtMicro, skinProtClar: S.skinProtClar,
         skinMask: skinMaskBytes(fp.skinMask),
         faceCount: fp.faces.length,
-        vibrance: S.vibrance,
       };
       const elapsedMs = Math.round(performance.now() - started);
       self.postMessage({ id, type: "result", width: merged.width, height: merged.height, data: merged.data, params, pendingFinish: true, elapsedMs, engine, status }, [merged.data.buffer]);
