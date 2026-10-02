@@ -34,7 +34,10 @@ let flashEnabled = false;
 let wakeLock = null;
 let startRequest = 0;
 
-const JPEG_QUALITY = 0.95;
+// Fallback path (used where the browser has no ImageCapture, e.g. iPhone Safari):
+// the most the platform gives a web page is the video track's own frame, so we
+// keep every pixel of it and encode at maximum JPEG quality. No crop, no filter.
+const JPEG_QUALITY = 1.0;
 
 const toast = (msg, ms = 2800) => {
   toastEl.textContent = msg;
@@ -150,7 +153,17 @@ function applyZoom(z) {
   zoomVal = Math.round(Math.min(zoomMax, Math.max(zoomMin, z)) * 10) / 10;
   updateZoomUi();
   if (zoomTrack?.readyState === "live") {
-    zoomTrack.applyConstraints({ advanced: [{ zoom: zoomVal }] }).catch(() => {});
+    zoomTrack.applyConstraints({ advanced: [{ zoom: zoomVal }] })
+      .then(() => {
+        // Read back the zoom the camera actually applied; if the device
+        // silently ignored the request, show the true value, not the dial's.
+        const actual = zoomTrack.getSettings?.().zoom;
+        if (typeof actual === "number" && Math.abs(actual - zoomVal) > 0.05) {
+          zoomVal = Math.round(actual * 10) / 10;
+          positionZoomDial();
+        }
+      })
+      .catch(() => {});
   }
 }
 
