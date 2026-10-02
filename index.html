@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="./styles.css?v=14">
+<link rel="stylesheet" href="./styles.css?v=15">
 </head>
 <body>
 
@@ -21,18 +21,13 @@
   <button id="flashButton" class="pill-btn flash-btn" aria-pressed="false" title="Flash">
     <span class="ico">&#9889;</span><span class="val" id="flashVal">off</span>
   </button>
-  <div id="focusRing" class="focus-ring hidden" aria-hidden="true"></div>
 </div>
 <canvas id="captureCanvas" class="hidden"></canvas>
 
 <div class="controls">
-  <div class="zoomdial-wrap">
-    <div id="zoomDial" class="zoomdial" role="slider" tabindex="0" aria-label="Zoom"
-         aria-valuemin="1" aria-valuemax="4" aria-valuenow="1">
-      <div id="zoomStrip" class="zoomdial-strip"></div>
-      <div class="zoomdial-center"></div>
-    </div>
-    <span id="zoomLabel">1.0&times;</span>
+  <div class="zoom-control">
+    <label for="zoomSlider">Zoom <output id="zoomLabel" for="zoomSlider">1.0&times;</output></label>
+    <input id="zoomSlider" type="range" min="1" max="4" step="0.1" value="1" aria-label="Zoom">
   </div>
 
   <button id="captureButton" class="shutter" aria-label="Take photo" disabled><span>&#9673;</span></button>
@@ -63,7 +58,7 @@
 <div id="flashZap"></div>
 <div id="toast"></div>
 
-<script src="./app.js?v=14"></script>
-<script src="./camera-pipeline.js?v=14"></script>
+<script src="./app.js?v=15"></script>
+<script src="./camera-pipeline.js?v=15"></script>
 </body>
 </html>

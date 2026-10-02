@@ -18,9 +18,7 @@ const flashZap = $("flashZap");
 const toastEl = $("toast");
 const procEl = $("processing");
 const procStage = $("procStage");
-const focusRing = $("focusRing");
-const zoomDial = $("zoomDial");
-const zoomStrip = $("zoomStrip");
+const zoomSlider = $("zoomSlider");
 const zoomLabel = $("zoomLabel");
 const galleryThumb = $("galleryThumb");
 const galleryThumbButton = $("galleryThumbButton");
@@ -90,17 +88,20 @@ async function cameraStart() {
     placeholder.classList.add("hidden");
     captureButton.disabled = false;
     const track = stream.getVideoTracks()[0];
+    zoomTrack = track;
     const caps = track.getCapabilities?.() || {};
     flashButton.disabled = !caps.torch;
-    // Rotary zoom dial: device range if exposed, otherwise hidden.
+    // Show the simple zoom slider only when the camera exposes zoom.
     if (caps.zoom) {
       zoomMin = Math.max(1, caps.zoom.min || 1);
       zoomMax = Math.min(8, caps.zoom.max || 4);
       zoomVal = 1;
-      buildZoomDial();
-      zoomDial.closest(".zoomdial-wrap").classList.remove("hidden");
+      zoomSlider.min = zoomMin;
+      zoomSlider.max = zoomMax;
+      zoomSlider.value = zoomVal;
+      zoomSlider.closest(".zoom-control").classList.remove("hidden");
     } else {
-      zoomDial.closest(".zoomdial-wrap").classList.add("hidden");
+      zoomSlider.closest(".zoom-control").classList.add("hidden");
     }
   } catch (error) {
     stream?.getTracks().forEach((track) => track.stop());
@@ -109,70 +110,22 @@ async function cameraStart() {
   }
 }
 
-// ---------- rotary zoom dial ----------
-// A ticked strip you drag like a knob. 140px of drag = 1x. The strip moves
-// with the finger; the mint line marks the current value.
-const PX_PER_ZOOM = 140;
 let zoomMin = 1, zoomMax = 4, zoomVal = 1;
 let zoomTrack = null;
-let dialDragging = false, dialStartX = 0, dialStartZoom = 1;
+zoomSlider.addEventListener("input", () => applyZoom(Number(zoomSlider.value)));
 
-function buildZoomDial() {
-  zoomTrack = stream?.getVideoTracks()[0] || null;
-  const dialW = zoomDial.clientWidth || 280;
-  zoomStrip.innerHTML = "";
-  const totalW = (zoomMax - zoomMin) * PX_PER_ZOOM + dialW;
-  zoomStrip.style.width = `${totalW}px`;
-  // Phase the minor ticks so they line up under the integer majors.
-  zoomStrip.style.backgroundPosition = `${dialW / 2}px 0`;
-  for (let z = Math.ceil(zoomMin); z <= Math.floor(zoomMax); z++) {
-    const tick = document.createElement("div");
-    tick.className = "major-tick";
-    tick.style.left = `${dialW / 2 + (z - zoomMin) * PX_PER_ZOOM}px`;
-    zoomStrip.appendChild(tick);
-  }
-  positionZoomDial();
-}
-
-function positionZoomDial() {
-  const dialW = zoomDial.clientWidth || 280;
-  const x = dialW / 2 - (zoomVal - zoomMin) * PX_PER_ZOOM;
-  zoomStrip.style.transform = `translateX(${x}px)`;
+function updateZoomUi() {
+  zoomSlider.value = zoomVal;
   zoomLabel.textContent = `${zoomVal.toFixed(1)}×`;
-  zoomDial.setAttribute("aria-valuenow", zoomVal.toFixed(1));
-  zoomDial.setAttribute("aria-valuetext", `${zoomVal.toFixed(1)} times zoom`);
 }
 
 function applyZoom(z) {
   zoomVal = Math.round(Math.min(zoomMax, Math.max(zoomMin, z)) * 10) / 10;
-  positionZoomDial();
+  updateZoomUi();
   if (zoomTrack?.readyState === "live") {
     zoomTrack.applyConstraints({ advanced: [{ zoom: zoomVal }] }).catch(() => {});
   }
 }
-
-zoomDial.addEventListener("pointerdown", (event) => {
-  dialDragging = true;
-  dialStartX = event.clientX;
-  dialStartZoom = zoomVal;
-  zoomDial.setPointerCapture(event.pointerId);
-});
-zoomDial.addEventListener("pointermove", (event) => {
-  if (!dialDragging) return;
-  applyZoom(dialStartZoom - (event.clientX - dialStartX) / PX_PER_ZOOM);
-});
-const endDialDrag = () => { dialDragging = false; };
-zoomDial.addEventListener("pointerup", endDialDrag);
-zoomDial.addEventListener("pointercancel", endDialDrag);
-zoomDial.addEventListener("keydown", (event) => {
-  if (event.key === "ArrowLeft" || event.key === "ArrowDown") { applyZoom(zoomVal - 0.1); event.preventDefault(); }
-  if (event.key === "ArrowRight" || event.key === "ArrowUp") { applyZoom(zoomVal + 0.1); event.preventDefault(); }
-});
-let zoomRebuildT = 0;
-window.addEventListener("resize", () => {
-  clearTimeout(zoomRebuildT);
-  zoomRebuildT = setTimeout(() => { if (zoomTrack) buildZoomDial(); }, 200);
-});
 
 function stopCamera() {
   stream?.getTracks().forEach((track) => track.stop());
@@ -190,24 +143,6 @@ async function toggleFlash() {
     flashButton.classList.toggle("off", on);
     flashVal.textContent = !on ? "on" : "off";
   } catch { showError("Flash is not available on this camera."); }
-}
-
-async function showFocus(event) {
-  if (!stream) return;
-  const rect = video.getBoundingClientRect();
-  const x = (event.clientX - rect.left) / rect.width;
-  const y = (event.clientY - rect.top) / rect.height;
-  focusRing.style.left = `${event.clientX - rect.left}px`;
-  focusRing.style.top = `${event.clientY - rect.top}px`;
-  focusRing.classList.remove("hidden");
-  setTimeout(() => focusRing.classList.add("hidden"), 900);
-  try {
-    const track = stream.getVideoTracks()[0];
-    const caps = track.getCapabilities?.() || {};
-    if (caps.focusMode?.includes("single-shot")) {
-      await track.applyConstraints({ advanced: [{ focusMode: "single-shot", pointsOfInterest: [{ x, y }] }] });
-    }
-  } catch { /* focus not supported — ring is feedback only */ }
 }
 
 async function takePhoto() {
@@ -275,6 +210,5 @@ switchButton.onclick = () => { facingMode = facingMode === "environment" ? "user
 flashButton.onclick = toggleFlash;
 galleryThumbButton.onclick = openViewer;
 viewerOverlay.onclick = closeViewer;
-video.onclick = showFocus;
 window.addEventListener("beforeunload", stopCamera);
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
