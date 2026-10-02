@@ -1,7 +1,10 @@
-// Lumen Camera — pure native capture. No pipeline, no worker, no engines, no filters.
-// The viewfinder shows the raw camera feed. A capture is the camera's own still
-// (ImageCapture.takePhoto() at full sensor resolution), saved exactly as produced.
-// Canvas frame-grab is the fallback where ImageCapture is unavailable.
+// Lumen Camera — pure native capture, plus an always-on background finishing
+// filter (lumen-filter.js) applied to every capture before save. No worker,
+// no engines, no UI controls for the filter: the viewfinder shows the raw
+// camera feed. A capture is the camera's own still
+// (ImageCapture.takePhoto() at full sensor resolution), finished silently
+// with the Snapseed-style stack, then saved. Canvas frame-grab is the
+// fallback where ImageCapture is unavailable.
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,7 +39,8 @@ let startRequest = 0;
 
 // Fallback path (used where the browser has no ImageCapture, e.g. iPhone Safari):
 // the most the platform gives a web page is the video track's own frame, so we
-// keep every pixel of it and encode at maximum JPEG quality. No crop, no filter.
+// keep every pixel of it and encode at maximum JPEG quality before the filter
+// runs. No crop.
 const JPEG_QUALITY = 1.0;
 
 const toast = (msg, ms = 2800) => {
@@ -257,6 +261,14 @@ async function takePhoto() {
       blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
     }
     if (!blob) throw new Error("Photo encoding failed");
+    // Always-on background finishing filter (Snapseed-style stack).
+    // Runs silently here; the viewfinder and controls are untouched.
+    // Any failure falls back to the camera's own still.
+    setStage("Applying filter…");
+    try {
+      const filtered = await window.LumenFilter?.applyFilter(blob);
+      if (filtered) blob = filtered;
+    } catch { /* keep the original capture */ }
     processedBlob = blob;
     updateGalleryThumb(blob);
     savePhoto(blob);
