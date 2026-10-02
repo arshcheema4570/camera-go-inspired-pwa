@@ -29,7 +29,7 @@ let stream = null;
 let facingMode = "environment";
 let videoReady = false;
 let processedBlob = null;
-let flashArmed = false;
+let flashEnabled = false;
 
 const JPEG_QUALITY = 0.95;
 
@@ -90,10 +90,11 @@ async function cameraStart() {
     const track = stream.getVideoTracks()[0];
     zoomTrack = track;
     const caps = track.getCapabilities?.() || {};
-    flashButton.disabled = !caps.torch;
-    flashArmed = false;
+    // Rear cameras use the real torch. Front cameras use the screen as flash.
+    flashButton.disabled = !caps.torch && facingMode !== "user";
+    flashEnabled = false;
     flashButton.setAttribute("aria-pressed", "false");
-    flashButton.setAttribute("aria-label", "Flash off");
+    flashButton.setAttribute("aria-label", facingMode === "user" ? "Screen flash off" : "Flashlight off");
     // Show the simple zoom slider only when the camera exposes zoom.
     if (caps.zoom) {
       zoomMin = Math.max(1, caps.zoom.min || 1);
@@ -136,13 +137,23 @@ function stopCamera() {
   videoReady = false;
 }
 
-function toggleFlash() {
+async function toggleFlash() {
   if (!stream || flashButton.disabled) return;
-  flashArmed = !flashArmed;
-  flashButton.setAttribute("aria-pressed", String(flashArmed));
-  flashButton.setAttribute("aria-label", flashArmed ? "Flash on capture" : "Flash off");
-  flashButton.classList.toggle("off", !flashArmed);
-  toast(flashArmed ? "Flash will fire on capture" : "Flash off", 1800);
+  const nextState = !flashEnabled;
+  try {
+    if (facingMode !== "user") await setTorch(nextState);
+    flashEnabled = nextState;
+    flashButton.setAttribute("aria-pressed", String(flashEnabled));
+    flashButton.setAttribute("aria-label", facingMode === "user"
+      ? (flashEnabled ? "Screen flash on" : "Screen flash off")
+      : (flashEnabled ? "Flashlight on" : "Flashlight off"));
+    flashButton.classList.toggle("off", !flashEnabled);
+    toast(facingMode === "user"
+      ? (flashEnabled ? "Screen flash on" : "Screen flash off")
+      : (flashEnabled ? "Flashlight on" : "Flashlight off"), 1800);
+  } catch {
+    showError("The flashlight is not available on this camera.");
+  }
 }
 
 async function setTorch(on) {
@@ -156,13 +167,12 @@ async function takePhoto() {
   captureButton.disabled = true;
   setStage("Capturing…");
   showProc(true);
-  const useFlash = flashArmed && !flashButton.disabled;
+  const useScreenFlash = facingMode === "user" && flashEnabled;
   try {
-    if (useFlash) {
-      await setTorch(true);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+    if (useScreenFlash) {
+      fireFlash();
+      await new Promise((resolve) => setTimeout(resolve, 80));
     }
-    fireFlash();
     let blob = null;
     if (window.ImageCapture) {
       try { blob = await new ImageCapture(stream.getVideoTracks()[0]).takePhoto(); }
@@ -184,9 +194,6 @@ async function takePhoto() {
   } catch (error) {
     showError(`Capture failed: ${error.message || error.name}`);
   } finally {
-    if (useFlash) {
-      try { await setTorch(false); } catch { /* torch may stop with the camera */ }
-    }
     captureButton.disabled = false;
     showProc(false);
   }
