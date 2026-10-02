@@ -1,16 +1,10 @@
-/* v14 — Lumen v3.2 visual language: fullscreen viewfinder, floating top bar,
-   bottom shutter bar, GCam-Go toggle pills. No cards, no deck overlap. */
+/* Lumen v30 — pure native camera. Viewfinder + shutter + flash + camera flip. No filters. */
 :root{
   color-scheme:dark;
   --bg:#000; --fg:#fff; --dim:rgba(255,255,255,.55);
   --glass:rgba(0,0,0,.45);
   --accent:#ffd54a;
   --shutter:76px;
-  /* Dynamic hardware aspect-ratio lock: camera-pipeline.js sets this from
-     MediaStreamTrack.getSettings() on stream init (and re-locks on video
-     resize). Backing stores are sized from the same values with a uniform
-     scale, so the sensor can never be stretched. */
-  --sensor-ratio:4 / 3;
   font-family:Roboto,system-ui,-apple-system,"Segoe UI",sans-serif;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -18,15 +12,12 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hid
 body{height:100svh;user-select:none;-webkit-user-select:none;touch-action:manipulation}
 .hidden{display:none !important}
 
-/* ---------- fullscreen viewfinder ----------
-   object-fit:cover + a backing store locked to the true sensor aspect
-   (see --sensor-ratio) guarantees zero stretch: the feed is cropped,
-   never squished. */
-.viewfinder,.fx-canvas{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
-.viewfinder.mirrored,.fx-canvas.mirrored{transform:scaleX(-1)}
+/* ---------- fullscreen viewfinder (raw camera feed, cropped never squished) ---------- */
+.viewfinder{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+.viewfinder.mirrored{transform:scaleX(-1)}
 #captureCanvas{position:fixed;inset:0;pointer-events:none}
 
-/* ---------- top bar : flash / grid / timer ---------- */
+/* ---------- top bar : flash ---------- */
 .topbar{position:fixed;top:0;left:0;right:0;z-index:5;display:flex;align-items:center;justify-content:space-between;
   padding:calc(10px + env(safe-area-inset-top)) 18px 10px;background:linear-gradient(rgba(0,0,0,.55),transparent)}
 .topbar .group{display:flex;gap:6px;align-items:center}
@@ -36,32 +27,12 @@ body{height:100svh;user-select:none;-webkit-user-select:none;touch-action:manipu
 .tbtn[aria-pressed="true"]{background:rgba(255,255,255,.18)}
 .tbtn.off{color:var(--dim)}
 .tbtn .val{font-size:11px;color:var(--dim)}
-.brand{font-size:13px;font-weight:700;letter-spacing:3px;color:var(--fg);opacity:.9;
-  display:flex;flex-direction:column;align-items:center;gap:2px}
-.storage-sub{font-size:10px;font-weight:600;letter-spacing:.6px;color:var(--dim)}
+.brand{font-size:13px;font-weight:700;letter-spacing:3px;color:var(--fg);opacity:.9}
 
-/* ---------- zoom slider (floating, right edge) ---------- */
-.zoomwrap{position:fixed;right:10px;top:50%;transform:translateY(-50%);z-index:5;display:flex;flex-direction:column;align-items:center;gap:8px}
-.zoomwrap .zlab{font-size:11px;color:var(--dim);background:var(--glass);border-radius:10px;padding:2px 8px}
-input#zoomRange{writing-mode:vertical-lr;direction:rtl;width:34px;height:150px;accent-color:#fff;cursor:pointer}
-input#zoomRange:disabled{opacity:.4}
-
-/* ---------- mode switch above bottom bar ---------- */
-.modeswitch{position:fixed;left:0;right:0;bottom:calc(118px + env(safe-area-inset-bottom));z-index:5;
-  display:flex;justify-content:center;gap:26px}
-.modeswitch button{border:0;background:transparent;color:var(--dim);font-size:14px;font-weight:600;letter-spacing:1.5px;
-  padding:6px 4px;cursor:pointer;text-transform:uppercase}
-.modeswitch button.active{color:var(--fg)}
-.modeswitch button.active::after{content:"";display:block;height:3px;border-radius:2px;background:var(--accent);margin-top:3px}
-
-/* ---------- bottom bar : gallery / shutter / switch ---------- */
+/* ---------- bottom bar : shutter / flip ---------- */
 .bottombar{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;align-items:center;justify-content:space-between;
   padding:14px 30px calc(20px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.6))}
 .bottombar .spacer{width:48px}
-.gthumb{width:46px;height:46px;border-radius:10px;border:1.5px solid rgba(255,255,255,.7);
-  background:#111 center/cover no-repeat;padding:0;cursor:pointer;overflow:hidden;position:relative}
-.gthumb .gallery-empty{font-size:20px;opacity:.5}
-.gthumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .shutter{width:var(--shutter);height:var(--shutter);border-radius:50%;border:4px solid #fff;background:transparent;
   padding:0;cursor:pointer;position:relative;transition:transform .08s;display:grid;place-items:center}
 .shutter span{display:block;width:calc(var(--shutter) - 22px);height:calc(var(--shutter) - 22px);border-radius:50%;background:#fff}
@@ -71,15 +42,10 @@ input#zoomRange:disabled{opacity:.4}
   display:flex;align-items:center;justify-content:center}
 .bbtn:active{background:rgba(255,255,255,.25)}
 
-/* ---------- status pill ---------- */
-.status-pill{position:fixed;left:14px;bottom:calc(196px + env(safe-area-inset-bottom));z-index:5;
-  font-size:11px;color:var(--dim);background:var(--glass);border-radius:10px;padding:4px 10px;pointer-events:none}
-
 /* ---------- overlays ---------- */
 .enable-wrap{position:fixed;inset:0;z-index:8;display:flex;flex-direction:column;gap:18px;align-items:center;justify-content:center;
   background:radial-gradient(ellipse at 50% 35%,#14181d 0,#000 70%);text-align:center;padding:30px}
 .enable-wrap h1{font-size:22px;letter-spacing:4px;margin:0}
-.enable-wrap p{color:var(--dim);font-size:14px;max-width:320px;line-height:1.6;margin:0}
 .primary-btn{border:0;border-radius:999px;background:#fff;color:#000;font-weight:700;font-size:16px;padding:14px 34px;cursor:pointer}
 .error-message{font-size:12px;color:#ffc46b;min-height:18px;max-width:340px;text-align:center}
 #processing{position:fixed;inset:0;z-index:9;display:flex;flex-direction:column;gap:16px;align-items:center;justify-content:center;
@@ -88,9 +54,6 @@ input#zoomRange:disabled{opacity:.4}
 .spinner{width:52px;height:52px;border-radius:50%;border:4px solid rgba(255,255,255,.2);border-top-color:#fff;animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #procStage{font-size:14px;color:var(--fg);letter-spacing:.5px}
-#countdown{position:fixed;inset:0;z-index:9;display:flex;align-items:center;justify-content:center;font-size:120px;font-weight:200;color:#fff;
-  text-shadow:0 2px 30px rgba(0,0,0,.8)}
-#countdown[hidden]{display:none}
 #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(200px + env(safe-area-inset-bottom));z-index:10;
   background:rgba(20,20,20,.92);color:#fff;font-size:13px;padding:10px 18px;border-radius:8px;max-width:86vw;text-align:center;
   opacity:0;transition:opacity .25s;pointer-events:none}
@@ -98,23 +61,6 @@ input#zoomRange:disabled{opacity:.4}
 #flashZap{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:7}
 #flashZap.fire{animation:zap .28s ease-out}
 @keyframes zap{0%{opacity:.9}100%{opacity:0}}
-
-.grid-overlay{position:fixed;inset:0;z-index:4;pointer-events:none;
-  background:
-    linear-gradient(to right,transparent calc(33.33% - .5px),rgba(255,255,255,.35) calc(33.33% - .5px),rgba(255,255,255,.35) calc(33.33% + .5px),transparent calc(33.33% + .5px)),
-    linear-gradient(to right,transparent calc(66.66% - .5px),rgba(255,255,255,.35) calc(66.66% - .5px),rgba(255,255,255,.35) calc(66.66% + .5px),transparent calc(66.66% + .5px)),
-    linear-gradient(to bottom,transparent calc(33.33% - .5px),rgba(255,255,255,.35) calc(33.33% - .5px),rgba(255,255,255,.35) calc(33.33% + .5px),transparent calc(33.33% + .5px)),
-    linear-gradient(to bottom,transparent calc(66.66% - .5px),rgba(255,255,255,.35) calc(66.66% - .5px),rgba(255,255,255,.35) calc(66.66% + .5px),transparent calc(66.66% + .5px))}
 .focus-ring{position:fixed;z-index:6;width:84px;height:84px;margin:-42px 0 0 -42px;border:2px solid var(--accent);border-radius:50%;
   pointer-events:none;animation:focuspop .5s ease-out}
 @keyframes focuspop{0%{transform:scale(1.35);opacity:0}100%{transform:scale(1);opacity:1}}
-
-/* ---------- fullscreen photo viewer ---------- */
-.viewer{position:fixed;inset:0;z-index:20;background:#000;display:flex;flex-direction:column}
-.viewer-top{display:flex;justify-content:flex-end;padding:calc(12px + env(safe-area-inset-top)) 16px 8px}
-.viewer img{flex:1;min-height:0;width:100%;object-fit:contain;background:#000}
-.viewer-actions{display:flex;gap:12px;justify-content:center;padding:16px 16px calc(20px + env(safe-area-inset-bottom))}
-.vbtn{border:1px solid rgba(255,255,255,.35);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-weight:600;
-  border-radius:999px;padding:12px 22px;cursor:pointer;min-width:52px;min-height:52px}
-.vbtn.wide{flex:1;max-width:220px}
-.vbtn:active{background:rgba(255,255,255,.25)}

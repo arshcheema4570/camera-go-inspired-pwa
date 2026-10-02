@@ -1,4 +1,12 @@
+# Lumen Camera
 
-## Camera Go-style controls
+Minimal offline camera PWA. No filters, no processing pipeline, no engines.
 
-The interface uses a thumb-friendly dark control deck with a storage indicator, centered mode status, settings/flash actions, Portrait/Photo/Night/Video mode carousel, 1×/2× quick zoom, large shutter, last-photo thumbnail, and camera flip control. Touch targets are at least 48 px. The live viewfinder and result panel share the runtime sensor ratio from `MediaStreamTrack.getSettings()` and use `object-fit: cover` without stretching.
+- Fullscreen native viewfinder (raw camera feed)
+- Shutter button, flash (torch) toggle, front/back camera switch
+- Capture saves the camera's own still (`ImageCapture.takePhoto()` at full
+  sensor resolution) exactly as produced; canvas frame-grab fallback where
+  `ImageCapture` is unavailable
+- Every capture auto-saves the JPEG; tap-to-focus supported
+
+Offline via service worker. No cloud, no account.
