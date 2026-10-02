@@ -3,8 +3,8 @@
   color-scheme:dark;
   --bg:#0a0a0a; --fg:#f2f2f2; --dim:rgba(255,255,255,.55);
   --panel:#161616; --panel-border:rgba(255,255,255,.12);
-  --mint:#7de3a8; --mint-ink:#0c2b1a;
-  --accent:#ffd54a;
+  --mint:#f0f0f0; --mint-ink:#111;
+  --accent:#f0f0f0;
   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
