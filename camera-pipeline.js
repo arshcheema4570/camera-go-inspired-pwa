@@ -11,7 +11,6 @@ const startButton = $("startButton");
 const captureButton = $("captureButton");
 const switchButton = $("switchButton");
 const flashButton = $("flashButton");
-const flashVal = $("flashVal");
 const placeholder = $("previewPlaceholder");
 const errorMessage = $("errorMessage");
 const flashZap = $("flashZap");
@@ -30,6 +29,7 @@ let stream = null;
 let facingMode = "environment";
 let videoReady = false;
 let processedBlob = null;
+let flashArmed = false;
 
 const JPEG_QUALITY = 0.95;
 
@@ -91,6 +91,9 @@ async function cameraStart() {
     zoomTrack = track;
     const caps = track.getCapabilities?.() || {};
     flashButton.disabled = !caps.torch;
+    flashArmed = false;
+    flashButton.setAttribute("aria-pressed", "false");
+    flashButton.setAttribute("aria-label", "Flash off");
     // Show the simple zoom slider only when the camera exposes zoom.
     if (caps.zoom) {
       zoomMin = Math.max(1, caps.zoom.min || 1);
@@ -133,16 +136,19 @@ function stopCamera() {
   videoReady = false;
 }
 
-async function toggleFlash() {
+function toggleFlash() {
+  if (!stream || flashButton.disabled) return;
+  flashArmed = !flashArmed;
+  flashButton.setAttribute("aria-pressed", String(flashArmed));
+  flashButton.setAttribute("aria-label", flashArmed ? "Flash on capture" : "Flash off");
+  flashButton.classList.toggle("off", !flashArmed);
+  toast(flashArmed ? "Flash will fire on capture" : "Flash off", 1800);
+}
+
+async function setTorch(on) {
   if (!stream) return;
   const track = stream.getVideoTracks()[0];
-  const on = track.getSettings().torch === true;
-  try {
-    await track.applyConstraints({ advanced: [{ torch: !on }] });
-    flashButton.setAttribute("aria-pressed", String(!on));
-    flashButton.classList.toggle("off", on);
-    flashVal.textContent = !on ? "on" : "off";
-  } catch { showError("Flash is not available on this camera."); }
+  await track.applyConstraints({ advanced: [{ torch: on }] });
 }
 
 async function takePhoto() {
@@ -150,8 +156,13 @@ async function takePhoto() {
   captureButton.disabled = true;
   setStage("Capturing…");
   showProc(true);
-  fireFlash();
+  const useFlash = flashArmed && !flashButton.disabled;
   try {
+    if (useFlash) {
+      await setTorch(true);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    fireFlash();
     let blob = null;
     if (window.ImageCapture) {
       try { blob = await new ImageCapture(stream.getVideoTracks()[0]).takePhoto(); }
@@ -173,6 +184,9 @@ async function takePhoto() {
   } catch (error) {
     showError(`Capture failed: ${error.message || error.name}`);
   } finally {
+    if (useFlash) {
+      try { await setTorch(false); } catch { /* torch may stop with the camera */ }
+    }
     captureButton.disabled = false;
     showProc(false);
   }
