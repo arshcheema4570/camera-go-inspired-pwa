@@ -25,7 +25,6 @@ const galleryThumb = $("galleryThumb");
 const galleryThumbButton = $("galleryThumbButton");
 const viewerOverlay = $("viewerOverlay");
 const viewerImage = $("viewerImage");
-const viewerClose = $("viewerClose");
 let viewerObjectUrl = null;
 
 let stream = null;
@@ -221,7 +220,7 @@ switchButton.onclick = () => { facingMode = facingMode === "environment" ? "user
 flashButton.onclick = toggleFlash;
 zoomRange.oninput = () => setZoom(zoomRange.value);
 galleryThumbButton.onclick = openViewer;
-viewerClose.onclick = closeViewer;
+viewerOverlay.onclick = closeViewer;
 video.onclick = showFocus;
 window.addEventListener("beforeunload", stopCamera);
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
