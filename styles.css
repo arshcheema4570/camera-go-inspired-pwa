@@ -22,17 +22,24 @@ button{font-family:inherit}
 .viewfinder.mirrored{transform:scaleX(-1)}
 #captureCanvas{position:fixed;inset:0;pointer-events:none}
 
-/* ---------- pill buttons ---------- */
+/* ---------- compact controls ---------- */
 .pill-btn{min-width:52px;height:52px;padding:0 16px;border:1px solid var(--panel-border);
   border-radius:999px;background:rgba(22,22,22,.85);color:var(--fg);
   font-size:20px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer}
 .pill-btn:active{background:rgba(255,255,255,.18)}
 .pill-btn.off{color:var(--dim)}
 
-/* ---------- flash : floating on the preview card ---------- */
-.flash-btn{position:absolute;top:12px;left:12px;z-index:5}
-.flash-icon{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linejoin:round}
-.flash-btn[aria-pressed="true"]{border-color:var(--mint);color:var(--mint)}
+/* ---------- minimalist flash switch ---------- */
+.flash-toggle{position:absolute;top:12px;left:12px;z-index:5;height:42px;display:flex;align-items:center;gap:8px;
+  padding:0 10px;border:1px solid var(--panel-border);border-radius:999px;background:rgba(14,14,14,.86);
+  color:var(--dim);font:inherit;font-size:11px;cursor:pointer;backdrop-filter:blur(6px)}
+.flash-toggle:disabled{opacity:.45;cursor:not-allowed}
+.flash-icon{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linejoin:round}
+.flash-toggle-track{width:31px;height:18px;padding:2px;border-radius:999px;background:#3a3a3a;display:flex;align-items:center;transition:.16s}
+.flash-toggle-thumb{width:14px;height:14px;border-radius:50%;background:#bdbdbd;transition:transform .16s,background .16s}
+.flash-toggle[aria-checked="true"]{color:var(--fg);border-color:rgba(255,255,255,.3)}
+.flash-toggle[aria-checked="true"] .flash-toggle-track{background:#f0f0f0}
+.flash-toggle[aria-checked="true"] .flash-toggle-thumb{background:#111;transform:translateX(13px)}
 
 /* ---------- controls column under the preview ---------- */
 .controls{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;
@@ -85,3 +92,6 @@ button{font-family:inherit}
 #flashZap{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:7}
 #flashZap.fire{animation:zap .28s ease-out}
 @keyframes zap{0%{opacity:.9}100%{opacity:0}}
+#screenFlash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:30}
+#screenFlash.fire{animation:screen-zap .2s ease-out}
+@keyframes screen-zap{0%{opacity:1}100%{opacity:0}}

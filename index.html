@@ -12,14 +12,16 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="./styles.css?v=15">
+<link rel="stylesheet" href="./styles.css?v=16">
 </head>
 <body>
 
 <div class="preview-wrap">
   <video id="preview" class="viewfinder" autoplay muted playsinline></video>
-  <button id="flashButton" class="pill-btn flash-btn" aria-pressed="false" title="Flashlight / screen flash" aria-label="Flashlight off">
+  <button id="flashButton" class="flash-toggle" type="button" role="switch" aria-checked="false" title="Flash off" aria-label="Flash off">
     <svg class="flash-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.2 2.8 5.8 13h5.3l-1 8.2L18.2 11h-5.3l.3-8.2Z"/></svg>
+    <span class="flash-toggle-track"><span class="flash-toggle-thumb"></span></span>
+    <span class="flash-toggle-label">Off</span>
   </button>
 </div>
 <canvas id="captureCanvas" class="hidden"></canvas>
@@ -56,9 +58,10 @@
   <div id="procStage">Capturing&hellip;</div>
 </div>
 <div id="flashZap"></div>
+<div id="screenFlash" aria-hidden="true"></div>
 <div id="toast"></div>
 
-<script src="./app.js?v=15"></script>
-<script src="./camera-pipeline.js?v=15"></script>
+<script src="./app.js?v=16"></script>
+<script src="./camera-pipeline.js?v=16"></script>
 </body>
 </html>
