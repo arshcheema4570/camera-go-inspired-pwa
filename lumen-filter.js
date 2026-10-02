@@ -1,42 +1,44 @@
-// Lumen Camera — always-on background finishing filter (Snapseed-style stack).
-// Applied to every capture after the camera's still is decoded, before save.
-// Runs silently: no UI, no toggles, no viewfinder change.
+// Lumen Camera — always-on background finishing filter.
+// Two presets, both Snapseed-style stacks, applied to every capture after the
+// camera's still is decoded, before save. Runs silently; only the PRO toggle
+// (a small pill on the preview) chooses between them.
 //
-// Stack (midpoints of the spec'd ranges):
-//   Brightness +12, Contrast +7, Saturation +7, Ambiance +20,
-//   Highlights -20, Shadows +15, Warmth +2.5,
-//   Structure +6 (wide-radius micro-contrast on luminance),
-//   Sharpening +12 (narrow-radius unsharp on luminance),
-//   Face Spotlight: feathered elliptical brighten + mild texture softening per
-//   detected face, via the platform FaceDetector API (no bundled model).
+// standard: the rock-solid v40 filter — brightness +12, contrast +7,
+//   saturation +7, ambiance +20, highlights −20, shadows +15, warmth +2.5,
+//   structure +6, sharpening +12, face spotlight +10 / smoothing 0.22.
+// pro: Pixel-HDR+-style — ambiance +22, highlights −30, shadows +22,
+//   contrast +15, structure +20, sharpening +12, temperature −5 (cooler,
+//   clinical), face spotlight +20 / smoothing 0.33.
 
 (function () {
   "use strict";
 
-  const P = {
-    brightness: 12,
-    contrast: 7,
-    saturation: 7,
-    ambiance: 20,
-    highlights: -20,
-    shadows: 15,
-    warmth: 2.5,
-    structure: 6,
-    sharpening: 12,
-    faceBrighten: 10,
+  const PRESETS = {
+    standard: {
+      brightness: 12, contrast: 7, saturation: 7, ambiance: 20,
+      highlights: -20, shadows: 15, warmth: 2.5,
+      structure: 6, sharpening: 12,
+      faceBrighten: 10, faceSmooth: 0.22,
+    },
+    pro: {
+      brightness: 0, contrast: 15, saturation: 0, ambiance: 22,
+      highlights: -30, shadows: 22, warmth: -5,
+      structure: 20, sharpening: 12,
+      faceBrighten: 20, faceSmooth: 0.33,
+    },
   };
 
   const clamp255 = (v) => (v < 0 ? 0 : v > 255 ? 255 : v);
 
   // ---- Pass 1: global per-pixel adjustments --------------------------------
-  function globalPass(data) {
-    const bOff = P.brightness * 1.2; // +14.4 at spec midpoint
+  function globalPass(data, P) {
+    const bOff = P.brightness * 1.2;
     const c = P.contrast;
-    const cFactor = (259 * (c + 255)) / (255 * (259 - c)); // ~1.056 at +7
-    const hlAmt = (-P.highlights / 100) * 0.6; // up to -12% pull-down at white
-    const shLift = P.shadows * 1.2; // up to +18 lift at black
+    const cFactor = (259 * (c + 255)) / (255 * (259 - c));
+    const hlAmt = (-P.highlights / 100) * 0.6; // pull-down at white
+    const shLift = P.shadows * 1.2; // lift at black
     const vibAmt = (P.ambiance / 100) * 0.9; // vibrance: desaturated pixels gain most
-    const satF = 1 + P.saturation / 100; // 1.07
+    const satF = 1 + P.saturation / 100;
     const warmR = P.warmth * 1.2, warmG = P.warmth * 0.35, warmB = -P.warmth * 0.9;
 
     for (let i = 0; i < data.length; i += 4) {
@@ -67,7 +69,7 @@
       g = lum + (g - lum) * k;
       b = lum + (b - lum) * k;
 
-      // Warmth: gentle toward warm
+      // Warmth (negative = cooler)
       r += warmR; g += warmG; b += warmB;
 
       data[i] = clamp255(r);
@@ -143,9 +145,8 @@
     }
   }
 
-  // ---- Face Spotlight: feathered brighten + mild texture softening ----------
-  function applyFaceSpotlight(data, lum, wideBlur, faces, w, h) {
-    const brighten = P.faceBrighten;
+  // ---- Face Spotlight: feathered brighten + skin smoothing -------------------
+  function applyFaceSpotlight(data, lum, wideBlur, faces, w, h, P) {
     for (const f of faces) {
       const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
       const rx = f.w * 0.62, ry = f.h * 0.72;
@@ -161,7 +162,7 @@
           const p = y * w + x;
           const i = p * 4;
           // brighten + pull slightly toward local average (softens skin texture)
-          const d = (brighten + (wideBlur[p] - lum[p]) * 0.22) * mask;
+          const d = (P.faceBrighten + (wideBlur[p] - lum[p]) * P.faceSmooth) * mask;
           data[i] = clamp255(data[i] + d);
           data[i + 1] = clamp255(data[i + 1] + d);
           data[i + 2] = clamp255(data[i + 2] + d);
@@ -171,7 +172,8 @@
   }
 
   // ---- Entry point ----------------------------------------------------------
-  async function applyFilter(blob) {
+  async function applyFilter(blob, presetName) {
+    const P = PRESETS[presetName] || PRESETS.standard;
     const bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" }).catch(
       () => createImageBitmap(blob)
     );
@@ -188,7 +190,7 @@
     const img = ctx.getImageData(0, 0, w, h);
     const data = img.data;
 
-    globalPass(data);
+    globalPass(data, P);
 
     // Luminance plane + two detail blurs (buffer reused between them).
     const lum = new Uint8Array(w * h);
@@ -206,7 +208,7 @@
     boxBlur(lum, w, h, 2, blur, tmp);
     applyDetail(data, lum, blur, (P.sharpening / 100) * 1.1);
 
-    if (faces.length) applyFaceSpotlight(data, lum, blur, faces, w, h);
+    if (faces.length) applyFaceSpotlight(data, lum, blur, faces, w, h, P);
 
     ctx.putImageData(img, 0, 0);
     // Full resolution, maximum JPEG quality: the pixel math requires one
@@ -214,5 +216,5 @@
     return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 1.0));
   }
 
-  window.LumenFilter = { applyFilter };
+  window.LumenFilter = { applyFilter, PRESETS: Object.keys(PRESETS) };
 })();

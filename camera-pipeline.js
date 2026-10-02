@@ -191,6 +191,23 @@ function stopCamera() {
   videoReady = false;
 }
 
+const proButton = $("proButton");
+let proFilter = false;
+try { proFilter = localStorage.getItem("lumen-pro-filter") === "1"; } catch { /* storage unavailable */ }
+function updateProUi() {
+  proButton.setAttribute("aria-checked", String(proFilter));
+  const label = `Pro filter ${proFilter ? "on" : "off"}`;
+  proButton.setAttribute("aria-label", label);
+  proButton.title = label;
+}
+function togglePro() {
+  proFilter = !proFilter;
+  try { localStorage.setItem("lumen-pro-filter", proFilter ? "1" : "0"); } catch { /* storage unavailable */ }
+  updateProUi();
+  toast(proFilter ? "Pro filter on" : "Standard filter", 1600);
+}
+updateProUi();
+
 async function toggleFlash() {
   if (!stream || flashButton.disabled) return;
   const nextState = !flashEnabled;
@@ -264,9 +281,9 @@ async function takePhoto() {
     // Always-on background finishing filter (Snapseed-style stack).
     // Runs silently here; the viewfinder and controls are untouched.
     // Any failure falls back to the camera's own still.
-    setStage("Applying filter…");
+    setStage(proFilter ? "Applying pro filter…" : "Applying filter…");
     try {
-      const filtered = await window.LumenFilter?.applyFilter(blob);
+      const filtered = await window.LumenFilter?.applyFilter(blob, proFilter ? "pro" : "standard");
       if (filtered) blob = filtered;
     } catch { /* keep the original capture */ }
     processedBlob = blob;
@@ -314,6 +331,7 @@ startButton.onclick = cameraStart;
 captureButton.onclick = takePhoto;
 switchButton.onclick = () => { facingMode = facingMode === "environment" ? "user" : "environment"; cameraStart(); };
 flashButton.onclick = toggleFlash;
+proButton.onclick = togglePro;
 galleryThumbButton.onclick = openViewer;
 viewerOverlay.onclick = closeViewer;
 window.addEventListener("beforeunload", stopCamera);
