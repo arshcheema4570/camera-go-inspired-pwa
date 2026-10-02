@@ -1,5 +1,5 @@
-/* Lumen v31 — interface inspired by the reference screenshots: dark, technical,
-   mono labels, pill buttons, big mint shutter. Essentials only. */
+/* Lumen v33 — interface inspired by the reference screenshots: dark, technical,
+   mono labels, pill buttons, big mint shutter, rotary zoom dial. Essentials only. */
 :root{
   color-scheme:dark;
   --bg:#0a0a0a; --fg:#f2f2f2; --dim:rgba(255,255,255,.55);
@@ -10,12 +10,16 @@
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden;overscroll-behavior:none}
-body{height:100svh;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+body{height:100svh;user-select:none;-webkit-user-select:none;touch-action:manipulation;
+  display:flex;flex-direction:column}
 .hidden{display:none !important}
 button{font-family:inherit}
 
-/* ---------- fullscreen viewfinder (raw camera feed) ---------- */
-.viewfinder{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+/* ---------- preview card (smaller than fullscreen, not tiny) ---------- */
+.preview-wrap{position:relative;flex:none;height:54svh;
+  margin:calc(8px + env(safe-area-inset-top)) 12px 0;
+  border-radius:24px;overflow:hidden;background:#000;border:1px solid rgba(255,255,255,.08)}
+.viewfinder{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
 .viewfinder.mirrored{transform:scaleX(-1)}
 #captureCanvas{position:fixed;inset:0;pointer-events:none}
 
@@ -27,48 +31,45 @@ button{font-family:inherit}
 .pill-btn .val{font-size:11px;color:var(--dim);letter-spacing:.5px}
 .pill-btn.off{color:var(--dim)}
 
-/* ---------- flash : floating top-left ---------- */
-.flash-btn{position:fixed;top:calc(14px + env(safe-area-inset-top));left:16px;z-index:5}
+/* ---------- flash : floating on the preview card ---------- */
+.flash-btn{position:absolute;top:12px;left:12px;z-index:5}
 .flash-btn .ico{font-size:20px}
 .flash-btn[aria-pressed="true"]{border-color:var(--mint);color:var(--mint)}
 
-/* ---------- zoom dial : ticked strip above the shutter ---------- */
-.zoomdial-wrap{position:fixed;left:0;right:0;bottom:calc(218px + env(safe-area-inset-bottom));z-index:5;
-  display:flex;align-items:center;justify-content:center;gap:10px}
+/* ---------- controls column under the preview ---------- */
+.controls{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:space-evenly;padding:8px 0 calc(14px + env(safe-area-inset-bottom))}
+
+/* ---------- rotary zoom dial : drag the ticked strip ---------- */
+.zoomdial-wrap{display:flex;align-items:center;justify-content:center;gap:10px}
+.zoomdial{position:relative;width:min(300px,62vw);height:52px;border-radius:26px;flex:none;
+  background:#141414;border:1px solid var(--panel-border);overflow:hidden;
+  touch-action:none;cursor:ew-resize;outline:none}
+.zoomdial:focus-visible{border-color:var(--mint)}
+.zoomdial-strip{position:absolute;top:0;bottom:0;left:0;will-change:transform;
+  background:repeating-linear-gradient(to right,rgba(255,255,255,.25) 0 2px,transparent 2px 14px)}
+.zoomdial-center{position:absolute;left:50%;top:7px;bottom:7px;width:2px;margin-left:-1px;
+  background:var(--mint);border-radius:1px;pointer-events:none}
+.major-tick{position:absolute;top:0;bottom:0;width:2px;background:rgba(255,255,255,.6);pointer-events:none}
 #zoomLabel{font-size:13px;color:var(--fg);background:rgba(22,22,22,.85);border:1px solid var(--panel-border);
-  border-radius:12px;padding:6px 10px;min-width:56px;text-align:center}
-input#zoomRange{
-  -webkit-appearance:none;appearance:none;width:min(300px,58vw);height:46px;border-radius:23px;cursor:pointer;
-  border:1px solid var(--panel-border);outline:none;
-  background:
-    repeating-linear-gradient(to right,rgba(255,255,255,.32) 0 2px,transparent 2px 16px),
-    #141414;
-  background-position:center;background-repeat:repeat;
-}
-input#zoomRange::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:26px;height:46px;border-radius:13px;
-  background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.35)}
-input#zoomRange::-moz-range-thumb{width:26px;height:46px;border-radius:13px;
-  background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.35)}
-input#zoomRange:disabled{opacity:.35}
+  border-radius:12px;padding:8px 10px;min-width:58px;text-align:center}
 
 /* ---------- big mint shutter ---------- */
-.shutter{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(112px + env(safe-area-inset-bottom));z-index:5;
-  width:min(300px,64vw);height:88px;border-radius:999px;border:0;background:var(--mint);color:var(--mint-ink);
-  font-size:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;
+.shutter{width:min(300px,64vw);height:88px;border-radius:999px;border:0;background:var(--mint);color:var(--mint-ink);
+  font-size:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none;
   box-shadow:0 4px 24px rgba(125,227,168,.25)}
-.shutter:active{transform:translateX(-50%) scale(.96)}
+.shutter:active{transform:scale(.96)}
 .shutter:disabled{opacity:.35;cursor:default;box-shadow:none}
 
 /* ---------- bottom bar : gallery + flip ---------- */
-.bottombar{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;align-items:center;justify-content:space-between;
-  padding:14px 22px calc(20px + env(safe-area-inset-bottom))}
+.bottombar{width:100%;display:flex;align-items:center;justify-content:space-between;padding:0 22px}
 .gthumb{width:64px;height:64px;border-radius:20px;border:1px solid var(--panel-border);
   background:#111 center/cover no-repeat;padding:0;cursor:pointer;overflow:hidden;position:relative;
   display:flex;align-items:center;justify-content:center}
 .gthumb .gallery-empty{font-size:24px;opacity:.45}
 .gthumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 
-/* ---------- minimal viewer ---------- */
+/* ---------- minimal viewer (tap anywhere to close) ---------- */
 .viewer{position:fixed;inset:0;z-index:20;background:#000;display:flex;align-items:center;justify-content:center}
 .viewer.hidden{display:none !important}
 .viewer img{max-width:100%;max-height:100%;object-fit:contain}
@@ -87,7 +88,7 @@ input#zoomRange:disabled{opacity:.35}
   animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #procStage{font-size:14px;color:var(--fg);letter-spacing:.5px}
-#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(320px + env(safe-area-inset-bottom));z-index:10;
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:32svh;z-index:10;
   background:rgba(20,20,20,.92);color:#fff;font-size:13px;padding:10px 18px;border-radius:8px;max-width:86vw;text-align:center;
   opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
