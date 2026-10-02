@@ -25,49 +25,21 @@
     <button id="flashButton" class="tbtn off" aria-pressed="false" title="Flash">
       <span class="ico">&#9889;</span><span class="val" id="flashVal">off</span>
     </button>
-    <button id="gridButton" class="tbtn off" aria-pressed="false" title="Grid">
-      <span class="ico">&#9638;</span>
-    </button>
   </div>
-  <div class="brand">LUMEN<span class="storage-sub" id="storageIndicator">photos left</span><span class="storage-sub" id="versionBadge" style="margin-left:6px;opacity:.7">v28</span></div>
-  <div class="group">
-    <button id="timerButton" class="tbtn off" aria-pressed="false" title="Timer">
-      <span class="ico">&#9201;</span><span class="val" id="timerLabel">off</span>
-    </button>
-  </div>
+  <div class="brand">LUMEN</div>
+  <div class="group"></div>
 </div>
 
-<div class="zoomwrap">
-  <span class="zlab" id="zoomLabel">1.0&times;</span>
-  <input id="zoomRange" type="range" min="1" max="1" step="0.1" value="1" disabled aria-label="Zoom">
-</div>
-
-<div id="gridOverlay" class="grid-overlay hidden" aria-hidden="true">
-  <span></span><span></span><span></span><span></span>
-</div>
 <div id="focusRing" class="focus-ring hidden" aria-hidden="true"></div>
-<div id="countdown" hidden></div>
-
-<div class="modeswitch" role="tablist" aria-label="Capture modes">
-  <button class="mode" data-mode="portrait" role="tab" aria-selected="false">Portrait</button>
-  <button class="mode active" data-mode="photo" role="tab" aria-selected="true">Photo</button>
-  <button class="mode" data-mode="night" role="tab" aria-selected="false">Night</button>
-</div>
 
 <div class="bottombar">
-  <button id="galleryThumbButton" class="gthumb" aria-label="Open last photo">
-    <span class="gallery-empty">&#128444;</span>
-    <img id="galleryThumb" class="hidden" alt="Last captured photo">
-  </button>
+  <div class="spacer"></div>
   <button id="captureButton" class="shutter" aria-label="Take photo" disabled><span></span></button>
   <button id="switchButton" class="bbtn" aria-label="Switch camera">&#8646;</button>
 </div>
 
-<div id="statusPill" class="status-pill" role="status">Camera off</div>
-
 <div id="previewPlaceholder" class="enable-wrap">
   <h1>LUMEN</h1>
-  <p>On-device computational photography: adaptive burst, align-and-merge denoise, HDR bracketing &mdash; no cloud, no account.</p>
   <button id="startButton" class="primary-btn">Start camera</button>
   <p id="errorMessage" class="error-message hidden" role="alert"></p>
 </div>
@@ -78,17 +50,6 @@
 </div>
 <div id="flashZap"></div>
 <div id="toast"></div>
-
-<div id="viewerOverlay" class="viewer hidden" role="dialog" aria-modal="true" aria-label="Photo viewer">
-  <div class="viewer-top">
-    <button id="viewerClose" class="vbtn" aria-label="Close viewer">&#10005;</button>
-  </div>
-  <img id="viewerImage" alt="Captured photo">
-  <div class="viewer-actions">
-    <button id="viewerSave" class="vbtn wide">Save</button>
-    <button id="viewerShare" class="vbtn wide">Share</button>
-  </div>
-</div>
 
 <script src="./app.js?v=14"></script>
 <script src="./camera-pipeline.js?v=14"></script>

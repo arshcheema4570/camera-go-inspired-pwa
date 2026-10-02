@@ -55,8 +55,9 @@ input#zoomRange:disabled{opacity:.4}
 .modeswitch button.active::after{content:"";display:block;height:3px;border-radius:2px;background:var(--accent);margin-top:3px}
 
 /* ---------- bottom bar : gallery / shutter / switch ---------- */
-.bottombar{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;align-items:center;justify-content:space-evenly;
+.bottombar{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;align-items:center;justify-content:space-between;
   padding:14px 30px calc(20px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.6))}
+.bottombar .spacer{width:48px}
 .gthumb{width:46px;height:46px;border-radius:10px;border:1.5px solid rgba(255,255,255,.7);
   background:#111 center/cover no-repeat;padding:0;cursor:pointer;overflow:hidden;position:relative}
 .gthumb .gallery-empty{font-size:20px;opacity:.5}

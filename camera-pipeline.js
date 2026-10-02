@@ -7,29 +7,13 @@ const startButton = $("startButton");
 const captureButton = $("captureButton");
 const switchButton = $("switchButton");
 const flashButton = $("flashButton");
-const timerButton = $("timerButton");
-const timerLabel = $("timerLabel");
-const gridButton = $("gridButton");
-const gridOverlay = $("gridOverlay");
 const placeholder = $("previewPlaceholder");
-const statusPill = $("statusPill");
 const errorMessage = $("errorMessage");
-const countdown = $("countdown");
-const zoomRange = $("zoomRange");
-const zoomLabel = $("zoomLabel");
-const galleryThumb = $("galleryThumb");
-const galleryThumbButton = $("galleryThumbButton");
 const flashVal = $("flashVal");
 const flashZap = $("flashZap");
 const toastEl = $("toast");
 const procEl = $("processing");
 const procStage = $("procStage");
-const viewerOverlay = $("viewerOverlay");
-const viewerImage = $("viewerImage");
-const viewerClose = $("viewerClose");
-const viewerSave = $("viewerSave");
-const viewerShare = $("viewerShare");
-let viewerObjectUrl = null;
 // Single Pixel-inspired look (the iPhone style was removed at the user's
 // request — he wants Pixel-style photos from the PWA).
 
@@ -47,10 +31,8 @@ const worker = new Worker("./litert.worker.js", { type: "module" });
 
 let stream = null;
 let facingMode = "environment";
-let timerSeconds = 0;
 let mode = "photo";
 let videoReady = false;
-let originalImage = null;
 let processedBlob = null;
 let burstCount = 3;
 let requestId = 0;
@@ -58,11 +40,10 @@ let liveFrame = 0;
 let gl = null;
 let glProgram = null;
 let glTexture = null;
-let galleryObjectUrl = null;
 let sensorWidth = 0;
 let sensorHeight = 0;
 
-const setStatus = (text) => { statusPill.textContent = text; };
+const setStatus = (text) => { console.debug("[lumen]", text); };
 const setStage = (text) => { procStage.textContent = text; };
 const showProc = (on) => { procEl.hidden = !on; };
 const toast = (msg, ms = 2800) => {
@@ -217,30 +198,17 @@ const FINISH_TONE_FRAG = FINISH_HEAD + [
   "uniform float shadowTarget;",
   "uniform float shadowAmt;",
   "uniform float shadowEdge;",
-  "uniform float autoBlack;",
-  "uniform float autoWhite;",
-  "uniform float autoContrastMul;",
-  "uniform float autoSaturation;",
-  "uniform float autoShadowMul;",
-  "uniform sampler2D skinMask;",
   "float sstep(float e0, float e1, float x){ float t = clamp((x-e0)/(e1-e0), 0.0, 1.0); return t*t*(3.0-2.0*t); }",
   "void main(){",
   "  vec3 c0 = texture2D(src, uv).rgb * gains;",
   "  float L = dot(c0, vec3(0.2126, 0.7152, 0.0722));",
   "  float Lp = L * exposure;",
-  "  Lp = (Lp - autoBlack) / max(autoWhite - autoBlack, 1e-3);",
   "  Lp = min(Lp, knee) + max(Lp - knee, 0.0) * kneeKeep;",
-  "  Lp = (Lp - 0.5) * contrast * autoContrastMul + 0.5;",
-  "  Lp += (shadowTarget - Lp) * shadowAmt * autoShadowMul * sstep(shadowEdge, 0.0, Lp);",
+  "  Lp = (Lp - 0.5) * contrast + 0.5;",
+  "  Lp += (shadowTarget - Lp) * shadowAmt * sstep(shadowEdge, 0.0, Lp);",
   "  vec3 c = c0 * (L > 1e-6 ? max(Lp / L, 0.0) : 0.0);",
   "  float m = max(max(c.r, c.g), c.b);",
   "  if (m > 1.0) c /= m;",
-  // Auto saturation: hue-preserving chroma scale around luma; dialed back on
-  // skin so faces never go sunburned.
-  "  float sk = texture2D(skinMask, uv).r;",
-  "  float satEff = 1.0 + (autoSaturation - 1.0) * (1.0 - sk * 0.6);",
-  "  float lf = dot(c, vec3(0.2126, 0.7152, 0.0722));",
-  "  c = lf + (c - lf) * satEff;",
   "  gl_FragColor = vec4(clamp(c, 0.0, 1.5) / TONE_SCALE, texture2D(src, uv).a);",
   "}",
 ].join("\n");
@@ -365,7 +333,7 @@ function initFinishGL(width, height) {
       gl, canvas, maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE),
       prog: { tone: progTone, blur: progBlur, blurMed: progBlurMed, comp: progComp },
       uni: {
-        tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), autoBlack: loc(progTone, "autoBlack"), autoWhite: loc(progTone, "autoWhite"), autoContrastMul: loc(progTone, "autoContrastMul"), autoSaturation: loc(progTone, "autoSaturation"), autoShadowMul: loc(progTone, "autoShadowMul"), skinMask: loc(progTone, "skinMask"), position: gl.getAttribLocation(progTone, "position") },
+        tone: { src: loc(progTone, "src"), gains: loc(progTone, "gains"), exposure: loc(progTone, "exposure"), knee: loc(progTone, "knee"), kneeKeep: loc(progTone, "kneeKeep"), contrast: loc(progTone, "contrast"), shadowTarget: loc(progTone, "shadowTarget"), shadowAmt: loc(progTone, "shadowAmt"), shadowEdge: loc(progTone, "shadowEdge"), position: gl.getAttribLocation(progTone, "position") },
         blur: { src: loc(progBlur, "src"), texel: loc(progBlur, "texel"), position: gl.getAttribLocation(progBlur, "position") },
         blurMed: { src: loc(progBlurMed, "src"), texel: loc(progBlurMed, "texel"), position: gl.getAttribLocation(progBlurMed, "position") },
         comp: { tone: loc(progComp, "tone"), blurLuma: loc(progComp, "blurLuma"), blurMed: loc(progComp, "blurMed"), skinMask: loc(progComp, "skinMask"), texel: loc(progComp, "texel"), microAmt: loc(progComp, "microAmt"), sharpAmt: loc(progComp, "sharpAmt"), clarityAmt: loc(progComp, "clarityAmt"), haloGate: loc(progComp, "haloGate"), edgeRef: loc(progComp, "edgeRef"), sharpBase: loc(progComp, "sharpBase"), sharpClamp: loc(progComp, "sharpClamp"), skinProtSharp: loc(progComp, "skinProtSharp"), skinProtMicro: loc(progComp, "skinProtMicro"), skinProtClar: loc(progComp, "skinProtClar"), position: gl.getAttribLocation(progComp, "position") },
@@ -441,14 +409,6 @@ async function finishPhotoWebGL(result) {
     gl.uniform1f(U.tone.shadowTarget, params.shadowTarget);
     gl.uniform1f(U.tone.shadowAmt, params.shadowAmt);
     gl.uniform1f(U.tone.shadowEdge, params.shadowEdge);
-    gl.uniform1f(U.tone.autoBlack, params.autoBlack);
-    gl.uniform1f(U.tone.autoWhite, params.autoWhite);
-    gl.uniform1f(U.tone.autoContrastMul, params.autoContrastMul);
-    gl.uniform1f(U.tone.autoSaturation, params.autoSaturation);
-    gl.uniform1f(U.tone.autoShadowMul, params.autoShadowMul);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, F.tex.skin);
-    gl.uniform1i(U.tone.skinMask, 1);
-    gl.activeTexture(gl.TEXTURE0);
   });
   finishDraw(F, "blur", F.tgt.blurA.fbo, () => {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, F.tgt.tone.tex);
@@ -524,7 +484,6 @@ async function cameraStart() {
     fxCanvas.classList.toggle("mirrored", facingMode === "user");
     const caps = track.getCapabilities?.() || {};
     flashButton.disabled = !caps.torch;
-    if (caps.zoom) { zoomRange.disabled = false; zoomRange.min = caps.zoom.min || 1; zoomRange.max = Math.min(caps.zoom.max || 1, 4); zoomRange.step = caps.zoom.step || 0.1; zoomRange.value = track.getSettings().zoom || caps.zoom.min || 1; zoomLabel.textContent = `${Number(zoomRange.value).toFixed(1)}×`; }
     if (!gl) initLiveShader();
     if (gl && !liveFrame) renderLiveFrame();
   } catch (error) {
@@ -543,11 +502,6 @@ async function toggleFlash() {
   const track = stream.getVideoTracks()[0]; const on = track.getSettings().torch === true;
   try { await track.applyConstraints({ advanced: [{ torch: !on }] }); flashButton.setAttribute("aria-pressed", String(!on)); flashButton.classList.toggle("off", on); flashVal.textContent = !on ? "on" : "off"; }
   catch { showError("Flash is not available on this camera."); }
-}
-
-async function setZoom() {
-  if (!stream) return;
-  try { await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ zoom: Number(zoomRange.value) }] }); zoomLabel.textContent = `${Number(zoomRange.value).toFixed(1)}×`; } catch {}
 }
 
 function showFocus(event) {
@@ -699,9 +653,6 @@ function processBurst(frames, evs, finish = "cpu") {
       if (event.data.id !== id) return;
       worker.removeEventListener("message", handler);
       if (event.data.error) { reject(new Error(event.data.error)); return; }
-      // Show which worker version actually processed this photo (diagnoses SW caching).
-      const vb = document.getElementById("versionBadge");
-      if (vb && event.data.workerVersion) vb.textContent = "v28/w" + event.data.workerVersion;
       resolve(event.data);
     };
     worker.addEventListener("message", handler);
@@ -740,9 +691,8 @@ async function captureBurst(count, finish = "webgl") {
 
 async function takePhoto() {
   if (!stream || !videoReady) return;
-  if (timerSeconds) { for (let n = timerSeconds; n > 0; n -= 1) { countdown.textContent = n; countdown.hidden = false; await delay(1000); } countdown.hidden = true; }
-  const count = mode === "night" ? Math.min(6, burstCount + 2) : mode === "portrait" ? Math.min(5, burstCount + 1) : burstCount;
-  setStatus(`Capturing ${mode} photo…`);
+  const count = burstCount;
+  setStatus(`Capturing photo…`);
   setStage("Capturing…"); showProc(true); fireFlash();
   captureButton.disabled = true;
   try {
@@ -758,25 +708,14 @@ async function takePhoto() {
       blob = await finishedImageToBlob(result);
     }
     if (!blob) throw new Error("Photo encoding failed");
-    originalImage = await createImageBitmap(blob); processedBlob = blob;
-    if (galleryObjectUrl) URL.revokeObjectURL(galleryObjectUrl);
-    galleryObjectUrl = URL.createObjectURL(blob);
-    galleryThumb.src = galleryObjectUrl; galleryThumb.classList.remove("hidden"); galleryThumbButton.querySelector(".gallery-empty")?.classList.add("hidden");
+    processedBlob = blob;
     if (!result.hardwareStill) { if (result.elapsedMs > FRAME_BUDGET_MS) burstCount = Math.max(3, burstCount - 1); else if (burstCount < 6) burstCount += 1; }
     setStatus(result.hardwareStill ? `${result.frameCount} hardware stills merged` : result.elapsedMs > FRAME_BUDGET_MS ? "Thermal guard active" : "Photo ready offline");
-    toast(`${result.width}×${result.height} · ${result.frameCount} frame${result.frameCount === 1 ? "" : "s"}${result.bracketed ? " · HDR" : ""} · ${result.elapsedMs} ms`);
+    savePhoto(); // minimal UI: every capture auto-saves, no review screen
   } catch (error) { showError(`Photo processing failed: ${error.message}`); setStatus("Processing unavailable"); }
   finally { captureButton.disabled = false; showProc(false); }
 }
 
-function openViewer() {
-  if (!processedBlob) return;
-  if (viewerObjectUrl) URL.revokeObjectURL(viewerObjectUrl);
-  viewerObjectUrl = URL.createObjectURL(processedBlob);
-  viewerImage.src = viewerObjectUrl;
-  viewerOverlay.classList.remove("hidden");
-}
-function closeViewer() { viewerOverlay.classList.add("hidden"); }
 function savePhoto() {
   if (!processedBlob) return;
   const url = URL.createObjectURL(processedBlob);
@@ -785,29 +724,12 @@ function savePhoto() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast("Photo saved");
 }
-async function sharePhoto() {
-  if (!processedBlob) return;
-  const file = new File([processedBlob], `lumen-camera-${Date.now()}.jpg`, { type: "image/jpeg" });
-  if (navigator.canShare?.({ files: [file] })) {
-    try { await navigator.share({ files: [file] }); return; } catch { /* dismissed */ }
-  }
-  savePhoto();
-}
 
 startButton.onclick = cameraStart;
 captureButton.onclick = takePhoto;
 switchButton.onclick = () => { facingMode = facingMode === "environment" ? "user" : "environment"; cameraStart(); };
 flashButton.onclick = toggleFlash;
-zoomRange.oninput = setZoom;
 video.onclick = showFocus;
-gridButton.onclick = () => { const on = !gridOverlay.classList.toggle("hidden"); gridButton.setAttribute("aria-pressed", String(on)); gridButton.classList.toggle("off", !on); };
-timerButton.onclick = () => { timerSeconds = timerSeconds === 0 ? 3 : timerSeconds === 3 ? 10 : 0; timerLabel.textContent = timerSeconds ? `${timerSeconds}s` : "Off"; timerButton.setAttribute("aria-pressed", String(Boolean(timerSeconds))); timerButton.classList.toggle("off", !timerSeconds); };
-document.querySelectorAll(".mode").forEach((button) => button.onclick = () => { document.querySelectorAll(".mode").forEach((item) => { item.classList.remove("active"); item.setAttribute("aria-selected", "false"); }); button.classList.add("active"); button.setAttribute("aria-selected", "true"); mode = button.dataset.mode; setStatus(`${button.textContent} mode`); });
-document.querySelectorAll(".zoom-shortcut").forEach((button) => button.onclick = () => { zoomRange.value = button.dataset.zoom; zoomRange.dispatchEvent(new Event("input")); document.querySelectorAll(".zoom-shortcut").forEach((item) => item.classList.toggle("active", item === button)); });
-galleryThumbButton.onclick = openViewer;
-viewerClose.onclick = closeViewer;
-viewerSave.onclick = savePhoto;
-viewerShare.onclick = sharePhoto;
 video.addEventListener("resize", () => { if (videoReady && stream) lockSensorAspect(); });
 window.addEventListener("beforeunload", stopCamera);
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
