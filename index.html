@@ -19,23 +19,31 @@
 <video id="preview" class="viewfinder" autoplay muted playsinline></video>
 <canvas id="captureCanvas" class="hidden"></canvas>
 
-<div class="topbar">
-  <div class="group">
-    <button id="flashButton" class="tbtn off" aria-pressed="false" title="Flash">
-      <span class="ico">&#9889;</span><span class="val" id="flashVal">off</span>
-    </button>
-  </div>
-  <div class="brand">LUMEN</div>
-  <div class="group"></div>
+<button id="flashButton" class="pill-btn flash-btn" aria-pressed="false" title="Flash">
+  <span class="ico">&#9889;</span><span class="val" id="flashVal">off</span>
+</button>
+
+<div class="zoomdial-wrap">
+  <input id="zoomRange" type="range" min="1" max="4" step="0.1" value="1" aria-label="Zoom">
+  <span id="zoomLabel">1.0&times;</span>
+</div>
+
+<button id="captureButton" class="shutter" aria-label="Take photo" disabled><span>&#9673;</span></button>
+
+<div class="bottombar">
+  <button id="galleryThumbButton" class="gthumb" aria-label="Open last photo">
+    <span class="gallery-empty">&#128444;</span>
+    <img id="galleryThumb" class="hidden" alt="Last captured photo">
+  </button>
+  <button id="switchButton" class="pill-btn" aria-label="Switch camera">&#8646;</button>
+</div>
+
+<div id="viewerOverlay" class="viewer hidden" role="dialog" aria-modal="true" aria-label="Photo viewer">
+  <button id="viewerClose" class="pill-btn viewer-close" aria-label="Close viewer">&#10005;</button>
+  <img id="viewerImage" alt="Captured photo">
 </div>
 
 <div id="focusRing" class="focus-ring hidden" aria-hidden="true"></div>
-
-<div class="bottombar">
-  <div class="spacer"></div>
-  <button id="captureButton" class="shutter" aria-label="Take photo" disabled><span></span></button>
-  <button id="switchButton" class="bbtn" aria-label="Switch camera">&#8646;</button>
-</div>
 
 <div id="previewPlaceholder" class="enable-wrap">
   <h1>LUMEN</h1>

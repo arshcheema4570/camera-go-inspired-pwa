@@ -19,10 +19,19 @@ const toastEl = $("toast");
 const procEl = $("processing");
 const procStage = $("procStage");
 const focusRing = $("focusRing");
+const zoomRange = $("zoomRange");
+const zoomLabel = $("zoomLabel");
+const galleryThumb = $("galleryThumb");
+const galleryThumbButton = $("galleryThumbButton");
+const viewerOverlay = $("viewerOverlay");
+const viewerImage = $("viewerImage");
+const viewerClose = $("viewerClose");
+let viewerObjectUrl = null;
 
 let stream = null;
 let facingMode = "environment";
 let videoReady = false;
+let processedBlob = null;
 
 const JPEG_QUALITY = 0.95;
 
@@ -83,11 +92,32 @@ async function cameraStart() {
     const track = stream.getVideoTracks()[0];
     const caps = track.getCapabilities?.() || {};
     flashButton.disabled = !caps.torch;
+    // Zoom dial: device range if exposed, otherwise hidden.
+    if (caps.zoom) {
+      const zmin = Math.max(1, caps.zoom.min || 1);
+      const zmax = Math.min(8, caps.zoom.max || 4);
+      zoomRange.min = zmin; zoomRange.max = zmax; zoomRange.value = 1;
+      zoomRange.step = (zmax - zmin) > 4 ? 0.2 : 0.1;
+      zoomRange.disabled = false;
+      setZoomLabel(1);
+      zoomRange.closest(".zoomdial-wrap").classList.remove("hidden");
+    } else {
+      zoomRange.closest(".zoomdial-wrap").classList.add("hidden");
+    }
   } catch (error) {
     stream?.getTracks().forEach((track) => track.stop());
     stream = null;
     showError(explain(error));
   }
+}
+
+function setZoomLabel(z) { zoomLabel.textContent = `${Number(z).toFixed(1)}×`; }
+
+async function setZoom(z) {
+  if (!stream) return;
+  const track = stream.getVideoTracks()[0];
+  try { await track.applyConstraints({ advanced: [{ zoom: Number(z) }] }); setZoomLabel(z); }
+  catch { /* zoom step rejected by the camera */ }
 }
 
 function stopCamera() {
@@ -148,6 +178,8 @@ async function takePhoto() {
       blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
     }
     if (!blob) throw new Error("Photo encoding failed");
+    processedBlob = blob;
+    updateGalleryThumb(blob);
     savePhoto(blob);
   } catch (error) {
     showError(`Capture failed: ${error.message || error.name}`);
@@ -167,10 +199,29 @@ function savePhoto(blob) {
   toast("Photo saved");
 }
 
+function updateGalleryThumb(blob) {
+  if (viewerObjectUrl) URL.revokeObjectURL(viewerObjectUrl);
+  viewerObjectUrl = URL.createObjectURL(blob);
+  galleryThumb.src = viewerObjectUrl;
+  galleryThumb.classList.remove("hidden");
+  galleryThumbButton.querySelector(".gallery-empty")?.classList.add("hidden");
+}
+
+function openViewer() {
+  if (!viewerObjectUrl) { toast("No photos yet"); return; }
+  viewerImage.src = viewerObjectUrl;
+  viewerOverlay.classList.remove("hidden");
+}
+
+function closeViewer() { viewerOverlay.classList.add("hidden"); }
+
 startButton.onclick = cameraStart;
 captureButton.onclick = takePhoto;
 switchButton.onclick = () => { facingMode = facingMode === "environment" ? "user" : "environment"; cameraStart(); };
 flashButton.onclick = toggleFlash;
+zoomRange.oninput = () => setZoom(zoomRange.value);
+galleryThumbButton.onclick = openViewer;
+viewerClose.onclick = closeViewer;
 video.onclick = showFocus;
 window.addEventListener("beforeunload", stopCamera);
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));

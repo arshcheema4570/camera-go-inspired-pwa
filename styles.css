@@ -1,60 +1,94 @@
-/* Lumen v30 — pure native camera. Viewfinder + shutter + flash + camera flip. No filters. */
+/* Lumen v31 — interface inspired by the reference screenshots: dark, technical,
+   mono labels, pill buttons, big mint shutter. Essentials only. */
 :root{
   color-scheme:dark;
-  --bg:#000; --fg:#fff; --dim:rgba(255,255,255,.55);
-  --glass:rgba(0,0,0,.45);
+  --bg:#0a0a0a; --fg:#f2f2f2; --dim:rgba(255,255,255,.55);
+  --panel:#161616; --panel-border:rgba(255,255,255,.12);
+  --mint:#7de3a8; --mint-ink:#0c2b1a;
   --accent:#ffd54a;
-  --shutter:76px;
-  font-family:Roboto,system-ui,-apple-system,"Segoe UI",sans-serif;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden;overscroll-behavior:none}
 body{height:100svh;user-select:none;-webkit-user-select:none;touch-action:manipulation}
 .hidden{display:none !important}
+button{font-family:inherit}
 
-/* ---------- fullscreen viewfinder (raw camera feed, cropped never squished) ---------- */
+/* ---------- fullscreen viewfinder (raw camera feed) ---------- */
 .viewfinder{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
 .viewfinder.mirrored{transform:scaleX(-1)}
 #captureCanvas{position:fixed;inset:0;pointer-events:none}
 
-/* ---------- top bar : flash ---------- */
-.topbar{position:fixed;top:0;left:0;right:0;z-index:5;display:flex;align-items:center;justify-content:space-between;
-  padding:calc(10px + env(safe-area-inset-top)) 18px 10px;background:linear-gradient(rgba(0,0,0,.55),transparent)}
-.topbar .group{display:flex;gap:6px;align-items:center}
-.tbtn{min-width:44px;height:40px;padding:0 10px;border:0;border-radius:20px;background:transparent;color:var(--fg);
-  font-size:13px;font-weight:600;letter-spacing:.4px;display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer}
-.tbtn .ico{font-size:19px;line-height:1}
-.tbtn[aria-pressed="true"]{background:rgba(255,255,255,.18)}
-.tbtn.off{color:var(--dim)}
-.tbtn .val{font-size:11px;color:var(--dim)}
-.brand{font-size:13px;font-weight:700;letter-spacing:3px;color:var(--fg);opacity:.9}
+/* ---------- pill buttons ---------- */
+.pill-btn{min-width:52px;height:52px;padding:0 16px;border:1px solid var(--panel-border);
+  border-radius:999px;background:rgba(22,22,22,.85);color:var(--fg);
+  font-size:20px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer}
+.pill-btn:active{background:rgba(255,255,255,.18)}
+.pill-btn .val{font-size:11px;color:var(--dim);letter-spacing:.5px}
+.pill-btn.off{color:var(--dim)}
 
-/* ---------- bottom bar : shutter / flip ---------- */
+/* ---------- flash : floating top-left ---------- */
+.flash-btn{position:fixed;top:calc(14px + env(safe-area-inset-top));left:16px;z-index:5}
+.flash-btn .ico{font-size:20px}
+.flash-btn[aria-pressed="true"]{border-color:var(--mint);color:var(--mint)}
+
+/* ---------- zoom dial : ticked strip above the shutter ---------- */
+.zoomdial-wrap{position:fixed;left:0;right:0;bottom:calc(218px + env(safe-area-inset-bottom));z-index:5;
+  display:flex;align-items:center;justify-content:center;gap:10px}
+#zoomLabel{font-size:13px;color:var(--fg);background:rgba(22,22,22,.85);border:1px solid var(--panel-border);
+  border-radius:12px;padding:6px 10px;min-width:56px;text-align:center}
+input#zoomRange{
+  -webkit-appearance:none;appearance:none;width:min(300px,58vw);height:46px;border-radius:23px;cursor:pointer;
+  border:1px solid var(--panel-border);outline:none;
+  background:
+    repeating-linear-gradient(to right,rgba(255,255,255,.32) 0 2px,transparent 2px 16px),
+    #141414;
+  background-position:center;background-repeat:repeat;
+}
+input#zoomRange::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:26px;height:46px;border-radius:13px;
+  background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.35)}
+input#zoomRange::-moz-range-thumb{width:26px;height:46px;border-radius:13px;
+  background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.35)}
+input#zoomRange:disabled{opacity:.35}
+
+/* ---------- big mint shutter ---------- */
+.shutter{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(112px + env(safe-area-inset-bottom));z-index:5;
+  width:min(300px,64vw);height:88px;border-radius:999px;border:0;background:var(--mint);color:var(--mint-ink);
+  font-size:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;
+  box-shadow:0 4px 24px rgba(125,227,168,.25)}
+.shutter:active{transform:translateX(-50%) scale(.96)}
+.shutter:disabled{opacity:.35;cursor:default;box-shadow:none}
+
+/* ---------- bottom bar : gallery + flip ---------- */
 .bottombar{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;align-items:center;justify-content:space-between;
-  padding:14px 30px calc(20px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.6))}
-.bottombar .spacer{width:48px}
-.shutter{width:var(--shutter);height:var(--shutter);border-radius:50%;border:4px solid #fff;background:transparent;
-  padding:0;cursor:pointer;position:relative;transition:transform .08s;display:grid;place-items:center}
-.shutter span{display:block;width:calc(var(--shutter) - 22px);height:calc(var(--shutter) - 22px);border-radius:50%;background:#fff}
-.shutter:active{transform:scale(.93)}
-.shutter:disabled{opacity:.35;cursor:default}
-.bbtn{width:48px;height:48px;border-radius:50%;border:0;background:rgba(255,255,255,.12);color:#fff;font-size:22px;cursor:pointer;
+  padding:14px 22px calc(20px + env(safe-area-inset-bottom))}
+.gthumb{width:64px;height:64px;border-radius:20px;border:1px solid var(--panel-border);
+  background:#111 center/cover no-repeat;padding:0;cursor:pointer;overflow:hidden;position:relative;
   display:flex;align-items:center;justify-content:center}
-.bbtn:active{background:rgba(255,255,255,.25)}
+.gthumb .gallery-empty{font-size:24px;opacity:.45}
+.gthumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+
+/* ---------- minimal viewer ---------- */
+.viewer{position:fixed;inset:0;z-index:20;background:#000;display:flex;align-items:center;justify-content:center}
+.viewer.hidden{display:none !important}
+.viewer img{max-width:100%;max-height:100%;object-fit:contain}
+.viewer-close{position:absolute;top:calc(14px + env(safe-area-inset-top));right:16px;z-index:21}
 
 /* ---------- overlays ---------- */
 .enable-wrap{position:fixed;inset:0;z-index:8;display:flex;flex-direction:column;gap:18px;align-items:center;justify-content:center;
   background:radial-gradient(ellipse at 50% 35%,#14181d 0,#000 70%);text-align:center;padding:30px}
 .enable-wrap h1{font-size:22px;letter-spacing:4px;margin:0}
-.primary-btn{border:0;border-radius:999px;background:#fff;color:#000;font-weight:700;font-size:16px;padding:14px 34px;cursor:pointer}
+.primary-btn{border:0;border-radius:999px;background:var(--mint);color:var(--mint-ink);font-weight:700;font-size:16px;
+  padding:14px 34px;cursor:pointer;font-family:inherit}
 .error-message{font-size:12px;color:#ffc46b;min-height:18px;max-width:340px;text-align:center}
 #processing{position:fixed;inset:0;z-index:9;display:flex;flex-direction:column;gap:16px;align-items:center;justify-content:center;
   background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
 #processing[hidden]{display:none}
-.spinner{width:52px;height:52px;border-radius:50%;border:4px solid rgba(255,255,255,.2);border-top-color:#fff;animation:spin .9s linear infinite}
+.spinner{width:52px;height:52px;border-radius:50%;border:4px solid rgba(255,255,255,.2);border-top-color:var(--mint);
+  animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #procStage{font-size:14px;color:var(--fg);letter-spacing:.5px}
-#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(200px + env(safe-area-inset-bottom));z-index:10;
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(320px + env(safe-area-inset-bottom));z-index:10;
   background:rgba(20,20,20,.92);color:#fff;font-size:13px;padding:10px 18px;border-radius:8px;max-width:86vw;text-align:center;
   opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
