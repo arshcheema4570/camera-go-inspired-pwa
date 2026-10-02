@@ -89,9 +89,6 @@ button{font-family:inherit}
   background:rgba(20,20,20,.92);color:#fff;font-size:13px;padding:10px 18px;border-radius:8px;max-width:86vw;text-align:center;
   opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
-#flashZap{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:7}
-#flashZap.fire{animation:zap .28s ease-out}
-@keyframes zap{0%{opacity:.9}100%{opacity:0}}
 #screenFlash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:30}
 #screenFlash.fire{animation:screen-zap .2s ease-out}
 @keyframes screen-zap{0%{opacity:1}100%{opacity:0}}

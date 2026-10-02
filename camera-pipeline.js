@@ -13,7 +13,6 @@ const switchButton = $("switchButton");
 const flashButton = $("flashButton");
 const placeholder = $("previewPlaceholder");
 const errorMessage = $("errorMessage");
-const flashZap = $("flashZap");
 const screenFlash = $("screenFlash");
 const toastEl = $("toast");
 const procEl = $("processing");
@@ -33,6 +32,7 @@ let videoReady = false;
 let processedBlob = null;
 let flashEnabled = false;
 let wakeLock = null;
+let startRequest = 0;
 
 const JPEG_QUALITY = 0.95;
 
@@ -48,11 +48,6 @@ const showError = (text) => {
 };
 const showProc = (on) => { procEl.hidden = !on; };
 const setStage = (text) => { procStage.textContent = text; };
-const fireFlash = () => {
-  flashZap.classList.remove("fire");
-  void flashZap.offsetWidth;
-  flashZap.classList.add("fire");
-};
 const fireScreenFlash = () => {
   screenFlash.classList.remove("fire");
   void screenFlash.offsetWidth;
@@ -82,6 +77,7 @@ function waitFrame() {
 }
 
 async function cameraStart() {
+  const requestId = ++startRequest;
   showError("");
   videoReady = false;
   captureButton.disabled = true;
@@ -99,6 +95,10 @@ async function cameraStart() {
     };
     try { stream = await navigator.mediaDevices.getUserMedia(constraints); }
     catch (error) { if (error.name !== "OverconstrainedError") throw error; stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
+    if (requestId !== startRequest) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
     video.srcObject = stream;
     await video.play();
     await waitFrame();
@@ -130,6 +130,9 @@ async function cameraStart() {
   } catch (error) {
     stream?.getTracks().forEach((track) => track.stop());
     stream = null;
+    zoomTrack = null;
+    placeholder.classList.remove("hidden");
+    captureButton.disabled = true;
     showError(explain(error));
   }
 }
@@ -153,12 +156,13 @@ function applyZoom(z) {
 
 function updateFlashUi(caps = {}) {
   const isFront = activeFacingMode === "user";
-  flashButton.disabled = !isFront && !caps.torch;
+  const usesScreen = isFront || !caps.torch;
+  flashButton.disabled = false;
   flashButton.setAttribute("aria-checked", String(flashEnabled));
-  flashButton.setAttribute("aria-label", isFront
+  flashButton.setAttribute("aria-label", usesScreen
     ? `Screen flash ${flashEnabled ? "on" : "off"}`
     : `Flashlight ${flashEnabled ? "on" : "off"}`);
-  flashButton.title = isFront
+  flashButton.title = usesScreen
     ? `Screen flash ${flashEnabled ? "on" : "off"}`
     : `Flashlight ${flashEnabled ? "on" : "off"}`;
   flashButton.querySelector(".flash-toggle-label").textContent = flashEnabled ? "On" : "Off";
@@ -174,10 +178,12 @@ async function toggleFlash() {
   if (!stream || flashButton.disabled) return;
   const nextState = !flashEnabled;
   try {
-    if (activeFacingMode === "environment") await setTorch(nextState);
+    const caps = stream.getVideoTracks()[0].getCapabilities?.() || {};
+    const usesScreen = activeFacingMode === "user" || !caps.torch;
+    if (!usesScreen) await setTorch(nextState);
     flashEnabled = nextState;
-    updateFlashUi(stream.getVideoTracks()[0].getCapabilities?.() || {});
-    toast(activeFacingMode === "user"
+    updateFlashUi(caps);
+    toast(usesScreen
       ? (flashEnabled ? "Screen flash on" : "Screen flash off")
       : (flashEnabled ? "Flashlight on" : "Flashlight off"), 1800);
   } catch {
@@ -233,7 +239,7 @@ async function takePhoto() {
       captureCanvas.width = video.videoWidth;
       captureCanvas.height = video.videoHeight;
       const ctx = captureCanvas.getContext("2d");
-      if (facingMode === "user") { ctx.translate(captureCanvas.width, 0); ctx.scale(-1, 1); }
+      if (currentFacing === "user") { ctx.translate(captureCanvas.width, 0); ctx.scale(-1, 1); }
       ctx.drawImage(video, 0, 0);
       blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
     }
