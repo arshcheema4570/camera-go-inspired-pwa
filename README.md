@@ -1,26 +1,21 @@
 # Lumen Camera
 
-Minimal offline camera PWA. No processing pipeline controls, no engines.
+A minimal, offline-capable camera PWA for capturing photos in the browser. It keeps a simple viewfinder and a small set of practical controls rather than a full manual-camera interface.
 
-- Simple native viewfinder (raw camera feed)
-- Shutter button, flashlight, front/back camera switch, and zoom slider
-- Capture saves the camera's own still (`ImageCapture.takePhoto()` at full
-  sensor resolution); canvas frame-grab fallback where `ImageCapture` is unavailable
-- An always-on background finishing filter is applied to every capture before
-  save, chosen by the PRO toggle (top-right of the preview; choice persists):
-  - **Standard** (default, the rock-solid v40 look): brightness +12,
-    contrast +7, saturation +7, ambiance +20, highlights −20, shadows +15,
-    warmth +2.5, structure +6, sharpening +12, face spotlight +10 with mild
-    skin smoothing.
-  - **Pro** (Pixel-HDR+-style): ambiance +22, highlights −30, shadows +22,
-    contrast +15, structure +20, sharpening +12, temperature −5 (cooler,
-    clinical), face spotlight +20 with subtle skin smoothing.
-  Full sensor resolution and maximum JPEG quality are kept; Face Spotlight uses
-  the platform FaceDetector API (skipped silently where unavailable); any filter
-  failure falls back to the unfiltered camera still
-- On the rear camera, the flash button controls the real torch continuously for use as a flashlight
-- On the front camera, the same button enables a white screen flash during capture
-- The toggle state persists while switching cameras; rear cameras fall back to screen flash when no torch capability is exposed
-- No pro mode, ISO/shutter/focus controls, leveler, filters, or color themes
+**Try it:** [Lumen Camera](https://arshcheema4570.github.io/camera-go-inspired-pwa/)
 
-Offline via service worker. No cloud, no account.
+## Features
+
+- Live camera preview and photo capture, with the most recent capture available from the gallery control.
+- Front/rear camera switching and a zoom slider where the device exposes those capabilities.
+- Flash control: rear-camera torch when supported; a screen flash can be used during front-camera capture.
+- Two capture-finishing presets (Standard and Pro); the selected preset is retained on the device. Face detection is optional and skipped on browsers that do not support it.
+- Offline app shell through a service worker. Camera access itself still requires a supported camera, permission, and a secure context such as HTTPS or localhost.
+
+## Use and install
+
+Open the link above in a current mobile browser and allow camera access when prompted. Use the browser’s **Install app** or **Add to Home Screen** option to install it. After the first visit, the app shell is cached for offline launch; live camera features still depend on the device and browser APIs being available.
+
+## Scope
+
+Lumen is intentionally not a manual/pro camera: it does not offer ISO, shutter-speed, focus, or exposure controls. It has no account or cloud service; capture processing is performed in the browser.
