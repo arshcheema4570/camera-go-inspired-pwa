@@ -1,4 +1,4 @@
-/* Lumen v34 — a plain camera interface with only the essential controls. */
+/* Lumen v35 — a plain camera interface with only the essential controls. */
 :root{
   color-scheme:dark;
   --bg:#0a0a0a; --fg:#f2f2f2; --dim:rgba(255,255,255,.55);
@@ -98,6 +98,6 @@ button{font-family:inherit}
   background:rgba(20,20,20,.92);color:#fff;font-size:13px;padding:10px 18px;border-radius:8px;max-width:86vw;text-align:center;
   opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
-#screenFlash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:30}
-#screenFlash.fire{animation:screen-zap .2s ease-out}
-@keyframes screen-zap{0%{opacity:1}100%{opacity:0}}
+#screenFlash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:30;transition:opacity .2s ease-out}
+#screenFlash.active{opacity:1;transition:none}
+#screenFlash.fade{opacity:0}

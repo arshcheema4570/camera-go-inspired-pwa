@@ -34,6 +34,8 @@ let activeFacingMode = "environment";
 let videoReady = false;
 let processedBlob = null;
 let flashEnabled = false;
+let photoFlashAvailable = false;
+let torchAvailable = false;
 let wakeLock = null;
 let startRequest = 0;
 
@@ -55,11 +57,33 @@ const showError = (text) => {
 };
 const showProc = (on) => { procEl.hidden = !on; };
 const setStage = (text) => { procStage.textContent = text; };
-const fireScreenFlash = () => {
-  screenFlash.classList.remove("fire");
-  void screenFlash.offsetWidth;
-  screenFlash.classList.add("fire");
-};
+const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+async function raiseScreenFlash() {
+  screenFlash.classList.remove("fade");
+  screenFlash.classList.add("active");
+  // Keep a solid white frame on screen long enough for the display and the
+  // front camera's auto-exposure to react before requesting the capture.
+  await nextFrame();
+  await nextFrame();
+  await new Promise((resolve) => setTimeout(resolve, 180));
+}
+function lowerScreenFlash() {
+  screenFlash.classList.remove("active");
+  screenFlash.classList.add("fade");
+  setTimeout(() => screenFlash.classList.remove("fade"), 240);
+}
+function waitForNextVideoFrame() {
+  return new Promise((resolve) => {
+    if (typeof video.requestVideoFrameCallback === "function") {
+      let done = false;
+      const finish = () => { if (!done) { done = true; clearTimeout(timer); resolve(); } };
+      const timer = setTimeout(finish, 400);
+      video.requestVideoFrameCallback(finish);
+    } else {
+      requestAnimationFrame(() => setTimeout(resolve, 80));
+    }
+  });
+}
 async function requestScreenWakeLock() {
   if (!navigator.wakeLock?.request) return;
   try { wakeLock = await navigator.wakeLock.request("screen"); } catch { wakeLock = null; }
@@ -83,11 +107,27 @@ function waitFrame() {
   });
 }
 
+function supportsTorch(value) {
+  return value === true || (Array.isArray(value) && value.includes(true));
+}
+async function getPhotoFillLightModes(track) {
+  if (typeof window.ImageCapture !== "function") return [];
+  try {
+    const capture = new ImageCapture(track);
+    const capabilities = await capture.getPhotoCapabilities();
+    return Array.isArray(capabilities?.fillLightMode) ? capabilities.fillLightMode : [];
+  } catch { return []; }
+}
+
 async function cameraStart() {
   const requestId = ++startRequest;
   showError("");
   videoReady = false;
   captureButton.disabled = true;
+  flashEnabled = false;
+  photoFlashAvailable = false;
+  torchAvailable = false;
+  updateFlashUi();
   if (!window.isSecureContext) { showError("Open the HTTPS GitHub Pages address to use the camera."); return; }
   if (!navigator.mediaDevices?.getUserMedia) { showError("This browser does not expose camera access."); return; }
   try {
@@ -110,18 +150,17 @@ async function cameraStart() {
     await video.play();
     await waitFrame();
     if (!video.videoWidth) throw new Error("No video frame was received");
-    videoReady = true;
-    placeholder.classList.add("hidden");
-    captureButton.disabled = false;
     const track = stream.getVideoTracks()[0];
     zoomTrack = track;
     const caps = track.getCapabilities?.() || {};
     activeFacingMode = track.getSettings?.().facingMode || facingMode;
     video.classList.toggle("mirrored", activeFacingMode === "user");
-    updateFlashUi(caps);
-    if (flashEnabled && activeFacingMode === "environment" && caps.torch) {
-      try { await setTorch(true); } catch { showError("The flashlight is not available on this camera."); }
-    }
+    photoFlashAvailable = (await getPhotoFillLightModes(track)).includes("flash");
+    if (requestId !== startRequest) return;
+    torchAvailable = supportsTorch(caps.torch);
+    videoReady = true;
+    placeholder.classList.add("hidden");
+    updateFlashUi();
     // Show the simple zoom slider only when the camera exposes zoom.
     if (caps.zoom) {
       zoomMin = Math.max(1, caps.zoom.min || 1);
@@ -134,6 +173,7 @@ async function cameraStart() {
     } else {
       zoomSlider.closest(".zoom-control").classList.add("hidden");
     }
+    captureButton.disabled = false;
   } catch (error) {
     stream?.getTracks().forEach((track) => track.stop());
     stream = null;
@@ -171,18 +211,31 @@ function applyZoom(z) {
   }
 }
 
-function updateFlashUi(caps = {}) {
-  const isFront = activeFacingMode === "user";
-  const usesScreen = isFront || !caps.torch;
-  flashButton.disabled = false;
+function currentFlashMode() {
+  if (activeFacingMode === "user") return "screen";
+  if (photoFlashAvailable) return "photo";
+  if (torchAvailable) return "torch";
+  return "unavailable";
+}
+function updateFlashUi() {
+  const mode = currentFlashMode();
+  if (mode === "unavailable") flashEnabled = false;
+  const name = { screen: "Screen flash", photo: "Photo flash", torch: "Torch" }[mode];
+  flashButton.disabled = !stream || !videoReady || mode === "unavailable";
   flashButton.setAttribute("aria-checked", String(flashEnabled));
-  flashButton.setAttribute("aria-label", usesScreen
-    ? `Screen flash ${flashEnabled ? "on" : "off"}`
-    : `Flashlight ${flashEnabled ? "on" : "off"}`);
-  flashButton.title = usesScreen
-    ? `Screen flash ${flashEnabled ? "on" : "off"}`
-    : `Flashlight ${flashEnabled ? "on" : "off"}`;
-  flashButton.querySelector(".flash-toggle-label").textContent = flashEnabled ? "On" : "Off";
+  const state = flashEnabled ? "on" : "off";
+  const description = mode === "screen"
+    ? `${name} ${state}; used during capture`
+    : mode === "photo"
+      ? `${name} ${state}; requested from the camera during capture`
+      : mode === "torch"
+        ? `Torch ${state}; continuous light, not a synchronized photo flash`
+        : "Rear flash unavailable in this browser";
+  flashButton.setAttribute("aria-label", description);
+  flashButton.title = description;
+  flashButton.dataset.mode = mode;
+  flashButton.querySelector(".flash-toggle-label").textContent =
+    mode === "unavailable" ? "N/A" : `${mode === "screen" ? "Screen" : mode === "photo" ? "Flash" : "Torch"} ${state === "on" ? "On" : "Off"}`;
 }
 
 function stopCamera() {
@@ -209,24 +262,28 @@ function togglePro() {
 updateProUi();
 
 async function toggleFlash() {
-  if (!stream || flashButton.disabled) return;
+  const mode = currentFlashMode();
+  if (!stream || !videoReady || flashButton.disabled || mode === "unavailable") return;
   const nextState = !flashEnabled;
   try {
-    const caps = stream.getVideoTracks()[0].getCapabilities?.() || {};
-    const usesScreen = activeFacingMode === "user" || !caps.torch;
-    if (!usesScreen) await setTorch(nextState);
+    if (mode === "torch") await setTorch(nextState);
     flashEnabled = nextState;
-    updateFlashUi(caps);
-    toast(usesScreen
-      ? (flashEnabled ? "Screen flash on" : "Screen flash off")
-      : (flashEnabled ? "Flashlight on" : "Flashlight off"), 1800);
+    updateFlashUi();
+    const message = mode === "screen"
+      ? `Screen flash ${nextState ? "on for the next capture" : "off"}`
+      : mode === "photo"
+        ? `Photo flash ${nextState ? "on" : "off"}`
+        : `Continuous torch ${nextState ? "on" : "off"}`;
+    toast(message, 2200);
   } catch {
-    showError("The flashlight is not available on this camera.");
+    flashEnabled = false;
+    updateFlashUi();
+    showError("The camera torch is not available on this camera.");
   }
 }
 
 async function setTorch(on) {
-  if (!stream) return;
+  if (!stream || !torchAvailable) throw new Error("Torch unavailable");
   const track = stream.getVideoTracks()[0];
   await track.applyConstraints({ advanced: [{ torch: on }] });
 }
@@ -237,39 +294,37 @@ async function takePhoto() {
   setStage("Capturing…");
   showProc(true);
   const track = stream.getVideoTracks()[0];
-  const caps = track.getCapabilities?.() || {};
   const currentFacing = track.getSettings?.().facingMode || activeFacingMode || facingMode;
-  const useScreenFlash = flashEnabled && (currentFacing === "user" || !caps.torch);
+  const mode = currentFacing === "user" ? "screen" : photoFlashAvailable ? "photo" : torchAvailable ? "torch" : "unavailable";
+  const useScreenFlash = flashEnabled && mode === "screen";
+  const usePhotoFlash = flashEnabled && mode === "photo";
   let imageCapture = null;
   try { if (window.ImageCapture) imageCapture = new ImageCapture(track); } catch { imageCapture = null; }
-  let torchRaisedForCapture = false;
-  let imageFlashConfigured = false;
+  let screenFlashRaised = false;
+  let captureWarning = "";
   try {
     if (useScreenFlash) {
       await requestScreenWakeLock();
-      fireScreenFlash();
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    } else if (flashEnabled && currentFacing === "environment" && caps.torch) {
-      // Prefer a hardware flash mode when the browser exposes it.
-      if (!track.getSettings?.().torch && imageCapture?.setOptions) {
-        try {
-          await imageCapture.setOptions({ fillLightMode: "flash" });
-          imageFlashConfigured = true;
-        } catch { /* use torch fallback */ }
-      }
-      if (!track.getSettings?.().torch && !imageFlashConfigured) {
-        await setTorch(true);
-        torchRaisedForCapture = true;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+      screenFlashRaised = true;
+      await raiseScreenFlash();
+    }
+    if (usePhotoFlash && !imageCapture) {
+      captureWarning = "Still-photo flash is unavailable; this photo may be unlit.";
     }
     let blob = null;
     if (imageCapture) {
-      try { blob = await imageCapture.takePhoto(); }
-      catch { blob = null; }
+      try {
+        blob = usePhotoFlash
+          ? await imageCapture.takePhoto({ fillLightMode: "flash" })
+          : await imageCapture.takePhoto();
+      } catch {
+        if (usePhotoFlash) captureWarning = "The camera rejected hardware flash; this photo may be unlit.";
+        blob = null;
+      }
     }
     if (!blob) {
       // Fallback: grab the current viewfinder frame (video resolution).
+      if (useScreenFlash) await waitForNextVideoFrame();
       captureCanvas.width = video.videoWidth;
       captureCanvas.height = video.videoHeight;
       const ctx = captureCanvas.getContext("2d");
@@ -278,6 +333,13 @@ async function takePhoto() {
       blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
     }
     if (!blob) throw new Error("Photo encoding failed");
+    // The display flash should end as soon as the sensor exposure is done,
+    // not remain white while the slower image-finishing filter runs.
+    if (screenFlashRaised) {
+      lowerScreenFlash();
+      screenFlashRaised = false;
+      await releaseScreenWakeLock();
+    }
     // Always-on background finishing filter (Snapseed-style stack).
     // Runs silently here; the viewfinder and controls are untouched.
     // Any failure falls back to the camera's own still.
@@ -289,14 +351,13 @@ async function takePhoto() {
     processedBlob = blob;
     updateGalleryThumb(blob);
     savePhoto(blob);
+    if (captureWarning) toast(captureWarning, 4200);
   } catch (error) {
     showError(`Capture failed: ${error.message || error.name}`);
   } finally {
-    if (torchRaisedForCapture) {
-      try { await setTorch(false); } catch { /* camera may have stopped */ }
-    }
+    if (screenFlashRaised) lowerScreenFlash();
     if (useScreenFlash) await releaseScreenWakeLock();
-    captureButton.disabled = false;
+    captureButton.disabled = !videoReady;
     showProc(false);
   }
 }
