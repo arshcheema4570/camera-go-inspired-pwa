@@ -1,5 +1,5 @@
-const CACHE_NAME = "lumen-camera-v44";
-const SHELL = ["./", "./index.html", "./styles.css?v=19", "./camera-pipeline.js?v=19", "./lumen-filter.js?v=19", "./manifest.json", "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png"];
+const CACHE_NAME = "lumen-camera-v45";
+const SHELL = ["./", "./index.html", "./styles.css?v=20", "./camera-pipeline.js?v=20", "./camera-focus.js?v=20", "./lumen-filter.js?v=20", "./manifest.json", "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png"];
 
 self.addEventListener("install", (event) => event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener("activate", (event) => event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME && key.startsWith('lumen-camera-')).map((key) => caches.delete(key)))).then(() => self.clients.claim())));

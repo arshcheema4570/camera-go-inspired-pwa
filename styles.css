@@ -22,6 +22,18 @@ button{font-family:inherit}
 .viewfinder.mirrored{transform:scaleX(-1)}
 #captureCanvas{position:fixed;inset:0;pointer-events:none}
 
+/* ---------- tap-to-focus feedback ---------- */
+.focus-reticle{position:absolute;inset:0;z-index:4;pointer-events:none;opacity:0;transition:opacity .16s ease}
+.focus-reticle.is-searching,.focus-reticle.is-requested,.focus-reticle.is-failed{opacity:1}
+.focus-reticle-mark{position:absolute;left:var(--focus-x,50%);top:var(--focus-y,50%);width:58px;height:58px;
+  border:2px solid #fff;border-radius:50%;transform:translate3d(-50%,-50%,0) scale(.78);
+  transition:transform .18s ease,border-color .18s ease;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
+.focus-reticle.is-searching .focus-reticle-mark{animation:focus-pulse .58s ease-in-out infinite alternate}
+.focus-reticle.is-requested .focus-reticle-mark{border-color:#73efad;transform:translate3d(-50%,-50%,0) scale(1)}
+.focus-reticle.is-failed .focus-reticle-mark{border-color:#ff7373;transform:translate3d(-50%,-50%,0) scale(1)}
+@keyframes focus-pulse{to{transform:translate3d(-50%,-50%,0) scale(1)}}
+.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
 /* ---------- compact controls ---------- */
 .pill-btn{min-width:52px;height:52px;padding:0 16px;border:1px solid var(--panel-border);
   border-radius:999px;background:rgba(22,22,22,.85);color:var(--fg);

@@ -8,6 +8,7 @@ A minimal, offline-capable camera PWA for capturing photos in the browser. It ke
 
 - Live camera preview and photo capture, with the most recent capture available from the gallery control.
 - Front/rear camera switching and a zoom slider where the device exposes those capabilities.
+- Capability-aware autofocus: continuous autofocus is requested when available; tap the viewfinder to request a single-shot or localized focus adjustment on cameras that expose those controls. A brief reticle shows the request result.
 - Flash control: requests the camera’s synchronized photo flash when the browser exposes it; otherwise it offers a clearly labelled continuous rear torch when available. Front-camera captures can use a brief white screen flash.
 - Two capture-finishing presets (Standard and Pro); the selected preset is retained on the device. Face detection is optional and skipped on browsers that do not support it.
 - Offline app shell through a service worker. Camera access itself still requires a supported camera, permission, and a secure context such as HTTPS or localhost.
@@ -18,7 +19,7 @@ Open the link above in a current mobile browser and allow camera access when pro
 
 ## Scope
 
-Lumen is intentionally not a manual/pro camera: it does not offer ISO, shutter-speed, focus, or exposure controls. It has no account or cloud service; capture processing is performed in the browser.
+Lumen is intentionally not a manual/pro camera: it does not offer manual ISO, shutter-speed, focus-distance, or exposure controls. Focus controls vary by browser and camera; where tap-to-focus is not exposed, Lumen leaves autofocus to the camera and operating system. It has no account or cloud service; capture processing is performed in the browser.
 
 ## Flash limitations
 
