@@ -26,6 +26,8 @@ const galleryThumb = $("galleryThumb");
 const galleryThumbButton = $("galleryThumbButton");
 const viewerOverlay = $("viewerOverlay");
 const viewerImage = $("viewerImage");
+const focusReticle = $("focusReticle");
+const focusStatus = $("focusStatus");
 let viewerObjectUrl = null;
 
 let stream = null;
@@ -38,6 +40,7 @@ let photoFlashAvailable = false;
 let torchAvailable = false;
 let wakeLock = null;
 let startRequest = 0;
+let focusManager = null;
 
 // Fallback path (used where the browser has no ImageCapture, e.g. iPhone Safari):
 // the most the platform gives a web page is the video track's own frame, so we
@@ -123,6 +126,8 @@ async function cameraStart() {
   const requestId = ++startRequest;
   showError("");
   videoReady = false;
+  focusManager?.destroy();
+  focusManager = null;
   captureButton.disabled = true;
   flashEnabled = false;
   photoFlashAvailable = false;
@@ -153,6 +158,11 @@ async function cameraStart() {
     const track = stream.getVideoTracks()[0];
     zoomTrack = track;
     const caps = track.getCapabilities?.() || {};
+    focusManager = new window.CameraFocusManager(track, video, focusReticle, focusStatus, (message) => {
+      if (message) toast(message, 2200);
+    });
+    await focusManager.enableAutofocus();
+    if (requestId !== startRequest) return;
     activeFacingMode = track.getSettings?.().facingMode || facingMode;
     video.classList.toggle("mirrored", activeFacingMode === "user");
     photoFlashAvailable = (await getPhotoFillLightModes(track)).includes("flash");
@@ -175,6 +185,8 @@ async function cameraStart() {
     }
     captureButton.disabled = false;
   } catch (error) {
+    focusManager?.destroy();
+    focusManager = null;
     stream?.getTracks().forEach((track) => track.stop());
     stream = null;
     zoomTrack = null;
@@ -239,6 +251,8 @@ function updateFlashUi() {
 }
 
 function stopCamera() {
+  focusManager?.destroy();
+  focusManager = null;
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
   videoReady = false;
